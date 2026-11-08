@@ -1,0 +1,330 @@
+:root {
+  --font-family: 'Roboto', -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  
+  /* MD3 Color Palette - Light Theme */
+  --md-primary: #1a73e8;
+  --md-on-primary: #ffffff;
+  --md-primary-container: #d2e3fc;
+  --md-on-primary-container: #0d47a1;
+  
+  --md-surface: #ffffff;
+  --md-surface-container-lowest: #ffffff;
+  --md-surface-container-low: #f8f9fa;
+  --md-surface-container: #f1f3f4;
+  --md-surface-container-high: #e8eaed;
+  --md-surface-container-highest: #dadce0;
+  
+  --md-on-surface: #202124;
+  --md-on-surface-variant: #5f6368;
+  --md-outline: #dadce0;
+  --md-outline-variant: #e8eaed;
+  
+  --md-error: #d93025;
+  --md-error-container: #fce8e6;
+  --md-on-error-container: #c5221f;
+  
+  --md-warning: #e37400;
+  --md-warning-container: #fef7e0;
+  --md-on-warning-container: #b06000;
+  
+  --md-success: #188038;
+  --md-success-container: #e6f4ea;
+  --md-on-success-container: #137333;
+  
+  /* Shapes & Elevations */
+  --radius-xs: 4px;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 24px;
+  --radius-full: 9999px;
+  
+  --elevation-1: 0 1px 2px 0 rgba(60, 64, 67, 0.3), 0 1px 3px 1px rgba(60, 64, 67, 0.15);
+  --elevation-2: 0 1px 2px 0 rgba(60, 64, 67, 0.3), 0 2px 6px 2px rgba(60, 64, 67, 0.15);
+  --elevation-3: 0 4px 8px 3px rgba(60, 64, 67, 0.15), 0 1px 3px 0 rgba(60, 64, 67, 0.3);
+  
+  --focus-ring: 0 0 0 2px var(--md-surface), 0 0 0 4px var(--md-primary);
+  --transition-fast: 0.15s cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-normal: 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+[data-theme="dark"] {
+  --md-primary: #8ab4f8;
+  --md-on-primary: #202124;
+  --md-primary-container: #174ea6;
+  --md-on-primary-container: #d2e3fc;
+  
+  --md-surface: #202124;
+  --md-surface-container-lowest: #1f1f1f;
+  --md-surface-container-low: #28292c;
+  --md-surface-container: #2d2f31;
+  --md-surface-container-high: #35373a;
+  --md-surface-container-highest: #3c4043;
+  
+  --md-on-surface: #e8eaed;
+  --md-on-surface-variant: #9aa0a6;
+  --md-outline: #5f6368;
+  --md-outline-variant: #3c4043;
+  
+  --md-error: #f28b82;
+  --md-error-container: #5c1d1a;
+  --md-on-error-container: #fce8e6;
+  
+  --md-warning: #fdd663;
+  --md-warning-container: #664600;
+  --md-on-warning-container: #fef7e0;
+  
+  --md-success: #81c995;
+  --md-success-container: #0d522c;
+  --md-on-success-container: #e6f4ea;
+  
+  --elevation-1: 0 1px 3px 1px rgba(0, 0, 0, 0.3);
+  --elevation-2: 0 2px 6px 2px rgba(0, 0, 0, 0.4);
+  --elevation-3: 0 4px 12px 4px rgba(0, 0, 0, 0.5);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --md-primary: #8ab4f8;
+    --md-on-primary: #202124;
+    --md-primary-container: #174ea6;
+    --md-on-primary-container: #d2e3fc;
+    
+    --md-surface: #202124;
+    --md-surface-container-lowest: #1f1f1f;
+    --md-surface-container-low: #28292c;
+    --md-surface-container: #2d2f31;
+    --md-surface-container-high: #35373a;
+    --md-surface-container-highest: #3c4043;
+    
+    --md-on-surface: #e8eaed;
+    --md-on-surface-variant: #9aa0a6;
+    --md-outline: #5f6368;
+    --md-outline-variant: #3c4043;
+    
+    --md-error: #f28b82;
+    --md-error-container: #5c1d1a;
+    --md-on-error-container: #fce8e6;
+    
+    --md-warning: #fdd663;
+    --md-warning-container: #664600;
+    --md-on-warning-container: #fef7e0;
+    
+    --md-success: #81c995;
+    --md-success-container: #0d522c;
+    --md-on-success-container: #e6f4ea;
+    
+    --elevation-1: 0 1px 3px 1px rgba(0, 0, 0, 0.3);
+    --elevation-2: 0 2px 6px 2px rgba(0, 0, 0, 0.4);
+    --elevation-3: 0 4px 12px 4px rgba(0, 0, 0, 0.5);
+  }
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: var(--font-family);
+  background-color: var(--md-surface-container-low);
+  color: var(--md-on-surface);
+  min-height: 100vh;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+.material-symbols-outlined {
+  font-family: 'Material Symbols Outlined';
+  font-weight: normal;
+  font-style: normal;
+  font-size: 20px;
+  line-height: 1;
+  letter-spacing: normal;
+  text-transform: none;
+  display: inline-block;
+  white-space: nowrap;
+  word-wrap: normal;
+  direction: ltr;
+  user-select: none;
+  font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+}
+
+.material-symbols-outlined.fill {
+  font-variation-settings: 'FILL' 1, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+}
+
+/* Base button resets and focus rings */
+button {
+  font-family: inherit;
+  cursor: pointer;
+  border: none;
+  background: transparent;
+  outline: none;
+}
+
+button:focus-visible, input:focus-visible, textarea:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* Material Design 3 Dialog / Modal */
+.md-dialog-overlay {
+  position: fixed;
+  inset: 0;
+  background-color: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(2px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+  padding: 16px;
+  animation: fadeIn 0.15s ease-out;
+}
+
+.md-dialog-surface {
+  background-color: var(--md-surface);
+  color: var(--md-on-surface);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--elevation-3);
+  width: 100%;
+  max-width: 540px;
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--md-outline-variant);
+  animation: slideUp 0.2s cubic-bezier(0.2, 0, 0, 1);
+}
+
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(16px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.md-dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 18px 24px;
+  border-bottom: 1px solid var(--md-outline-variant);
+}
+
+.md-dialog-header h3 {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--md-on-surface);
+}
+
+.md-dialog-close-btn {
+  color: var(--md-on-surface-variant);
+  padding: 6px;
+  border-radius: var(--radius-full);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background-color var(--transition-fast);
+}
+
+.md-dialog-close-btn:hover {
+  background-color: var(--md-surface-container-high);
+}
+
+.md-dialog-error-banner {
+  margin: 16px 24px 0 24px;
+  padding: 10px 14px;
+  background-color: var(--md-error-container);
+  color: var(--md-on-error-container);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.md-dialog-form {
+  padding: 20px 24px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.md-form-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.md-form-field label {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--md-on-surface-variant);
+}
+
+.md-form-field input,
+.md-form-field textarea {
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--md-outline);
+  background-color: var(--md-surface);
+  color: var(--md-on-surface);
+  font-family: inherit;
+  font-size: 13.5px;
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.md-form-field input:focus,
+.md-form-field textarea:focus {
+  border-color: var(--md-primary);
+}
+
+.md-form-field input.input-error,
+.md-form-field textarea.input-error {
+  border-color: var(--md-error);
+}
+
+.field-error-text {
+  font-size: 11.5px;
+  color: var(--md-error);
+  font-weight: 500;
+}
+
+.md-dialog-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  padding-top: 8px;
+}
+
+.btn-cancel {
+  padding: 8px 18px;
+  border-radius: var(--radius-full);
+  color: var(--md-on-surface-variant);
+  font-weight: 500;
+  font-size: 13.5px;
+  transition: background-color var(--transition-fast);
+}
+
+.btn-cancel:hover {
+  background-color: var(--md-surface-container);
+}
+
+.btn-save-approve {
+  padding: 8px 22px;
+  border-radius: var(--radius-full);
+  background-color: var(--md-primary);
+  color: var(--md-on-primary);
+  font-weight: 500;
+  font-size: 13.5px;
+  box-shadow: var(--elevation-1);
+  transition: opacity var(--transition-fast);
+}
+
+.btn-save-approve:disabled,
+.btn-cancel:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
