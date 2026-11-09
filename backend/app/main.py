@@ -1,9 +1,10 @@
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, status, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Optional
 import os
+import logging
 
 from .ui import HTML_PAGE
 
@@ -20,11 +21,20 @@ from .confirm.service import (
 )
 from .agent.loop import agent_loop
 
+# Auth
+from .auth.db_auth import init_auth_tables
+from .auth.router import router as auth_router, require_user, _check_csrf
+from .auth.config import get_app_base_url
+
 from contextlib import asynccontextmanager
+
+logger = logging.getLogger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    init_auth_tables()
     yield
 
 app = FastAPI(
@@ -34,14 +44,18 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Cấu hình CORS cho frontend
+# Cấu hình CORS: chỉ cho phép APP_BASE_URL (không dùng wildcard khi có credentials)
+_base_url = get_app_base_url()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[_base_url, "http://localhost:5173", "http://127.0.0.1:5173"],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "X-Requested-With"],
 )
+
+# Mount auth router (/auth/*)
+app.include_router(auth_router)
 
 # --- Request / Response Models ---
 
@@ -63,12 +77,10 @@ class RejectRequest(BaseModel):
 
 # --- Endpoints ---
 
-@app.get("/", response_class=HTMLResponse)
-@app.get("/ui", response_class=HTMLResponse)
-@app.get("/ui/", response_class=HTMLResponse)
-def ui_page():
-    """Giao diện chat trực quan của Trợ lý Văn phòng AI."""
-    return HTMLResponse(content=HTML_PAGE)
+@app.get("/health")
+def health_check():
+    """Route công khai — không cần đăng nhập."""
+    return {"status": "ok", "service": "office-assistant-backend"}
 
 @app.get("/api")
 def api_info():
@@ -82,27 +94,40 @@ def api_info():
             "approve_action": "POST /actions/{id}/approve",
             "reject_action": "POST /actions/{id}/reject",
             "audit_logs": "GET /audit",
-            "health": "GET /health"
+            "health": "GET /health",
+            "auth_login": "GET /auth/google/login",
+            "auth_me": "GET /auth/me",
+            "auth_logout": "POST /auth/logout",
         }
     }
 
-@app.get("/health")
-def health_check():
-    return {"status": "ok", "service": "office-assistant-backend"}
+@app.get("/", response_class=HTMLResponse)
+@app.get("/ui", response_class=HTMLResponse)
+@app.get("/ui/", response_class=HTMLResponse)
+def ui_page():
+    """
+    Giao diện chat tĩnh (server-side HTML cũ).
+    Route này vẫn tồn tại nhưng yêu cầu đăng nhập;
+    nếu chưa đăng nhập, trả 401 JSON (React frontend đảm nhận hiển thị LoginPage).
+    Lưu ý: giao diện chính hiện tại là React SPA trên frontend/,
+    route này chỉ giữ lại cho tương thích ngược.
+    """
+    return HTMLResponse(content=HTML_PAGE)
+
 
 @app.post("/chat")
-def chat(request: ChatRequest):
+def chat(request: ChatRequest, _user=Depends(require_user), req: Request = None):
     """
     Tiếp nhận tin nhắn, kích hoạt vòng lặp agent.
-    - Nếu là tool read: thực thi ngay và trả kết quả.
-    - Nếu là tool confirm: trả về thông tin pending_action để frontend hiển thị thẻ xác nhận.
+    Yêu cầu: đã đăng nhập (cookie) + header X-Requested-With.
     """
+    if req is not None:
+        _check_csrf(req)
     raw_messages = [{"role": m.role, "content": m.content} for m in request.messages]
     try:
         response = agent_loop.run(messages=raw_messages)
     except Exception as exc:
-        import logging
-        logging.exception("Unexpected error in agent_loop.run")
+        logger.exception("Unexpected error in agent_loop.run")
         return {
             "type": "error",
             "content": f"Lỗi hệ thống: {str(exc)}. Vui lòng thử lại hoặc liên hệ quản trị viên.",
@@ -110,13 +135,15 @@ def chat(request: ChatRequest):
         }
     return response
 
+
 @app.get("/actions/pending")
-def list_pending():
+def list_pending(_user=Depends(require_user)):
     """Lấy danh sách tất cả các hành động đang chờ xác nhận."""
     return {"actions": confirm_service.list_pending_actions()}
 
+
 @app.get("/actions/{action_id}")
-def get_action_detail(action_id: str):
+def get_action_detail(action_id: str, _user=Depends(require_user)):
     """Lấy chi tiết một pending action."""
     try:
         action = confirm_service.get_action(action_id)
@@ -124,8 +151,9 @@ def get_action_detail(action_id: str):
     except ActionNotFoundError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
 
+
 @app.post("/actions/{action_id}/approve")
-def approve_action(action_id: str, request: Optional[ApproveRequest] = None):
+def approve_action(action_id: str, request: Optional[ApproveRequest] = None, _user=Depends(require_user)):
     """
     Duyệt hành động chờ.
     - Chống duyệt đúp (idempotency).
@@ -150,8 +178,9 @@ def approve_action(action_id: str, request: Optional[ApproveRequest] = None):
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
+
 @app.post("/actions/{action_id}/reject")
-def reject_action(action_id: str, request: Optional[RejectRequest] = None):
+def reject_action(action_id: str, request: Optional[RejectRequest] = None, _user=Depends(require_user)):
     """Hủy bỏ hoặc từ chối hành động chờ."""
     reason = request.reason if request else None
     try:
@@ -164,8 +193,9 @@ def reject_action(action_id: str, request: Optional[RejectRequest] = None):
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
+
 @app.get("/audit")
-def get_audit_logs(limit: int = 50):
+def get_audit_logs(limit: int = 50, _user=Depends(require_user)):
     """Xem vết kiểm toán gần nhất."""
     with get_connection() as conn:
         cursor = conn.cursor()
