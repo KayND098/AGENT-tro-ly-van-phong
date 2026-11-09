@@ -3,7 +3,7 @@ from typing import List, Dict, Any, Optional
 
 from .llm import LLMClient, FakeLLM, fake_llm, get_llm
 from ..tools.registry import registry, RiskLevel, ToolRegistry
-from ..tools import email, calendar, sheets
+from ..tools import email, calendar, sheets, docs
 from ..confirm.service import confirm_service, ConfirmService
 from ..db import record_audit_log
 

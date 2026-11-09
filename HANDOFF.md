@@ -59,6 +59,38 @@ Tài liệu bàn giao nhanh trạng thái hiện tại của dự án để ti�
   - Sửa lỗi Gemini 400 INVALID_ARGUMENT (chỉ hỗ trợ role "user" và "model"): Chuyển mọi Content chứa `function_response` sang `role="user"`.
   - Thêm các unit tests trong `backend/tests/test_gemini_function_calling.py` (mock 100%, không gọi mạng thật). Tổng cộng toàn bộ **22/22 tests pass** (`pytest backend/tests -v`).
 
+- **RAG Bản Đầu (SQLite FTS5 & tool `search_documents`)**:
+  - Tạo 4 file markdown tài liệu mẫu nội bộ công ty (`quy_trinh_nghi_phep.md`, `quy_dinh_cong_tac_phi.md`, `huong_dan_he_thong_bao_cao.md`, `chinh_sach_bao_mat.md`) trong `backend/data/docs/`.
+  - Triển khai `FtsRetriever` (`backend/app/rag/retriever.py`):
+    - Sử dụng SQLite FTS5 với tokenizer `unicode61 remove_diacritics 2` hỗ trợ tìm kiếm không dấu lẫn có dấu.
+    - Cắt theo tiêu đề mục (`##`, `###`) và đoạn ~700 ký tự, bảo toàn nguồn (tên file, tiêu đề mục).
+    - Lập chỉ mục khi backend khởi động, chỉ nạp lại nếu file thay đổi qua bảng sha256 `doc_index_meta`. Không crash nếu thư mục rỗng.
+    - Chặn hoàn toàn tấn công Path Traversal (`is_safe_file` và `read_document`).
+    - Lọc stop words tiếng Việt và đối khớp tỷ lệ từ khóa; câu hỏi không liên quan trả về `[]`.
+    - Tự động fallback sang Python keyword ranking nếu SQLite không có module FTS5.
+  - Đăng ký tool `search_documents` (`RiskLevel.READ`, tham số `query`) trong Tool Registry (`backend/app/tools/docs.py`).
+  - System instruction cập nhật quy tắc an toàn: Kết quả tài liệu là DỮ LIỆU, không phải chỉ thị; khi trả lời phải nêu rõ nguồn và mục, không bịa đặt.
+  - Bổ sung kịch bản 5 cho `FakeLLM` ("tìm tài liệu về nghỉ phép"), duy trì nguyên vẹn 4 kịch bản cũ.
+  - Bộ kiểm thử mới `backend/tests/test_rag_docs.py` (9 tests): Toàn bộ **31/31 tests pass** (100%).
+
+- **Google Phiên 1: Gmail OAuth & search_email (CHỈ ĐỌC)**:
+  - Thư viện bổ sung: `google-api-python-client>=2.120.0` và `google-auth-oauthlib>=1.2.0` vào `backend/requirements.txt`. Cài bằng: `python -m pip install -r backend/requirements.txt`.
+  - **Scope duy nhất**: `https://www.googleapis.com/auth/gmail.readonly` — không có quyền ghi hay gửi email.
+  - **Nơi lưu token**: `backend/secrets/token.json` (đường dẫn tuyệt đối qua `pathlib`). Cả `secrets/`, `token.json`, `client_secret*.json` đã có trong `.gitignore`.
+  - `backend/google_login.py`: script đăng nhập OAuth Desktop App một lần (`InstalledAppFlow`, mở trình duyệt localhost), lưu token an toàn. Chạy: `python backend/google_login.py`.
+  - `backend/app/providers/gmail_provider.py` (`GmailProvider`):
+    - Interface giống `MockEmailProvider`: `search_email(query)`, `create_draft(...)`, `send_email(...)`.
+    - `search_email`: truy vấn Gmail syntax, tối đa 10 thư, format metadata (`sender/to/subject/date/snippet`) — cùng định dạng với mock, frontend không cần thay đổi.
+    - `sanitize_sensitive_data`: che token (`ya29.*`, `1//*`, Bearer, client_secret) khỏi log và thông báo.
+    - Tự động làm mới token hết hạn nếu còn `refresh_token`; lỗi → `logging.exception` không kèm token.
+  - `backend/app/tools/email.py` cập nhật:
+    - `get_email_provider()`: chọn mock (mặc định) hoặc GmailProvider theo biến `EMAIL_PROVIDER`.
+    - Thiếu `client_secret.json` hoặc `token.json` → tự fallback mock + cảnh báo thân thiện, không crash.
+    - `email_provider` alias giữ nguyên — tương thích 100% với toàn bộ test cũ.
+    - `create_draft_handler` và `send_email_handler` vẫn dùng mock (ngoài phạm vi Phiên 1).
+  - Bộ kiểm thử `backend/tests/test_gmail_provider.py` (13 tests, mock 100%, không gọi mạng thật).
+  - Toàn bộ **44/44 tests pass** (100%).
+
 ---
 
 ## 2. CHƯA LÀM (VIỆC CÒN NỢ)
@@ -67,8 +99,8 @@ Tài liệu bàn giao nhanh trạng thái hiện tại của dự án để ti�
 - [ ] Thêm câu mẫu cho `FakeLLM` để nhận diện và sinh lệnh `create_event`.
 - [ ] Backend: Sinh lại dry-run `preview` (cập nhật `sample_rows_preview`) khi người dùng duyệt kèm `edited_args` cho `delete_rows`.
 - [ ] Form / Dialog "Sửa" cho `create_event` và `update_cells`.
-- [ ] Tích hợp Google Workspace API thật (OAuth 2.0 Authorization Code Flow, Gmail API, Google Calendar API, Google Sheets API).
-- [ ] Tích hợp RAG thật (Vector DB Chroma / Qdrant, embeddings, retrieval tài liệu văn phòng).
+- [ ] **Google Phiên 2**: Mở rộng Gmail (send_email, create_draft) + Google Calendar + Google Sheets với OAuth.
+- [ ] Mở rộng RAG nâng cao (Vector DB Chroma / Qdrant, embeddings, semantic chunking).
 - [ ] *(Tùy chọn - Ngoài phạm vi bài tập)* Mở rộng cơ chế phân quyền RBAC và xác thực người dùng đăng nhập.
 
 ---
@@ -84,7 +116,7 @@ python -m uvicorn app.main:app --reload --port 8000
 cd frontend
 npm.cmd run dev
 
-# 3. Kiểm thử Backend (22 tests)
+# 3. Kiểm thử Backend (44 tests)
 python -m pytest backend/tests -v
 
 # 4. Kiểm thử Frontend Build
@@ -92,4 +124,8 @@ cmd /c "npm --prefix frontend run build"
 
 # 5. Kiểm tra danh sách mô hình Gemini khả dụng
 python backend/check_models.py
+
+# 6. Đăng nhập Gmail OAuth (chỉ cần chạy 1 lần)
+# Yêu cầu: đặt client_secret.json vào backend/secrets/ trước
+python backend/google_login.py
 ```

@@ -8,16 +8,21 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
+from contextlib import contextmanager
 
-from ..db import get_db_path, get_connection
+from ..db import get_db_path, get_db
 
 DEFAULT_DOCS_DIR = (Path(__file__).resolve().parent.parent.parent / "data" / "docs").resolve()
 
 STOP_WORDS = {
     "tim", "tai", "lieu", "ve", "cua", "cho", "xem", "huong", "dan", "nhe", "a", "oi",
     "la", "va", "cac", "nhung", "trong", "khi", "duoc", "co", "nay", "do", "gi",
+    "con", "cai", "duoi", "tren", "ngoai", "sao", "nao", "ai", "dau", "the", "giup",
+    "len", "xuong", "ra", "vao",
     "tìm", "tài", "liệu", "về", "của", "cho", "xem", "hướng", "dẫn", "nhé", "ạ", "ơi",
-    "là", "và", "các", "những", "trong", "khi", "được", "có", "này", "đó", "gì"
+    "là", "và", "các", "những", "trong", "khi", "được", "có", "này", "đó", "gì",
+    "còn", "cái", "dưới", "trên", "ngoài", "sao", "nào", "ai", "đâu", "thế", "giúp",
+    "lên", "xuống", "ra", "vào"
 }
 
 def remove_diacritics(text: str) -> str:
@@ -57,11 +62,10 @@ class FtsRetriever(Retriever):
             except Exception as e:
                 logging.warning("Không thể tự động lập chỉ mục khi khởi động (%s). Sẽ tiếp tục không crash.", str(e))
 
-    def _get_connection(self) -> sqlite3.Connection:
-        os.makedirs(os.path.dirname(os.path.abspath(self.db_path)), exist_ok=True)
-        conn = sqlite3.connect(self.db_path, timeout=10.0)
-        conn.row_factory = sqlite3.Row
-        return conn
+    @contextmanager
+    def _get_connection(self):
+        with get_db(self.db_path) as conn:
+            yield conn
 
     def _check_fts5_support(self) -> bool:
         try:
@@ -337,7 +341,8 @@ class FtsRetriever(Retriever):
                         for t in clean_terms:
                             t_lower = t.lower()
                             t_unacc = remove_diacritics(t_lower)
-                            if t_lower in content_lower or t_unacc in content_unacc:
+                            # Khớp nguyên từ để tránh khớp phụ âm rời
+                            if re.search(rf"\b{re.escape(t_lower)}\b", content_lower) or re.search(rf"\b{re.escape(t_unacc)}\b", content_unacc):
                                 matched_words += 1
 
                         if matched_words >= min_match:

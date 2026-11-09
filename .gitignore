@@ -47,3 +47,9 @@ htmlcov/
 .vscode/
 
 *.log
+
+# Google OAuth secrets & tokens
+secrets/
+backend/secrets/
+token.json
+client_secret*.json

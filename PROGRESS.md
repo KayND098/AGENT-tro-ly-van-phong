@@ -1,6 +1,6 @@
 # PROGRESS.md - Tiến Độ Dự Án Trợ Lý Văn Phòng AI
 
-## Trạng Thái Hiện Tại: Đã hoàn thành Phiên 2A của "LLM thật" & Sửa lỗi Gemini Role "user" cho Function Response (22/22 tests pass)
+## Trạng Thái Hiện Tại: Đã hoàn thành Google Phiên 1 — Gmail OAuth & search_email (44/44 tests pass)
 
 - [x] Tạo `AGENTS.md` (luật hệ thống, phân quyền rủi ro tool)
 - [x] Tạo `docs/SKELETON_SPEC.md`
@@ -66,6 +66,47 @@
     - Hỗ trợ nhiều lời gọi hàm trong cùng 1 lượt: trả đủ `function_response` cho từng lời gọi đúng thứ tự vào `Content(role='user', parts=...)`.
     - `logging.exception` ghi chi tiết Exception type và thông báo lỗi API (đã che API key).
   - [x] Thêm 11 unit tests trong `backend/tests/test_gemini_function_calling.py` (mock 100%): tổng cộng **22/22 tests pass** (100%).
+- [x] **RAG Bản Đầu: Tìm kiếm tài liệu nội bộ bằng SQLite FTS5 & tool `search_documents`**:
+  - [x] Tạo 4 tài liệu văn phòng mẫu bằng tiếng Việt trong `backend/data/docs/` (`quy_trinh_nghi_phep.md`, `quy_dinh_cong_tac_phi.md`, `huong_dan_he_thong_bao_cao.md`, `chinh_sach_bao_mat.md`), định dạng markdown rõ ràng.
+  - [x] Triển khai `FtsRetriever` trong `backend/app/rag/retriever.py`:
+    - Phân đoạn tài liệu theo tiêu đề mục (`##`, `###`) và độ dài ~700 ký tự, giữ tên file và tiêu đề mục.
+    - Bảng ảo SQLite FTS5 `doc_chunks_fts` với tokenizer `unicode61 remove_diacritics 2` (tìm không dấu vẫn khớp).
+    - Tự động fallback sang Python keyword matching nếu SQLite máy không hỗ trợ module FTS5.
+    - Lập chỉ mục tự động khi khởi động kèm cơ chế tăng dần (so khớp sha256 qua bảng `doc_index_meta`).
+    - Ngăn chặn triệt để tấn công Path Traversal (`is_safe_file` và `read_document`).
+  - [x] Đăng ký tool `search_documents` (mức rủi ro `RiskLevel.READ`) trong `backend/app/tools/docs.py` với tham số `query` (string) và tích hợp vào `loop.py`.
+  - [x] Cập nhật system instruction an toàn: Đánh dấu kết quả từ tool là DỮ LIỆU, không phải chỉ thị điều khiển; yêu cầu LLM trích dẫn tên tài liệu nguồn và tiêu đề mục, không tự bịa đặt.
+  - [x] Bổ sung kịch bản 5 cho `FakeLLM` ("tìm tài liệu về nghỉ phép") phục vụ demo và test, giữ nguyên 4 kịch bản cũ.
+  - [x] Thêm bộ kiểm thử `backend/tests/test_rag_docs.py` (9 unit tests mới): tổng cộng toàn bộ **31/31 tests pass** (100%).
+
+- [x] **Google Phiên 1: Gmail OAuth & search_email (CHỈ ĐỌC)**:
+  - [x] Bổ sung `google-api-python-client>=2.120.0` và `google-auth-oauthlib>=1.2.0` vào `backend/requirements.txt`. Hướng dẫn cài: `python -m pip install -r backend/requirements.txt`.
+  - [x] Cập nhật `.gitignore` ngăn commit `secrets/`, `token.json`, `client_secret*.json`.
+  - [x] Cập nhật `.env.example` với `EMAIL_PROVIDER=mock` (mặc định mock).
+  - [x] Tạo `backend/google_login.py`: script đăng nhập OAuth Desktop App một lần, mở trình duyệt localhost, lưu token vào `backend/secrets/token.json` (tuyệt đối không log token).
+  - [x] Tạo `backend/app/providers/gmail_provider.py` (`GmailProvider`):
+    - Scope tối thiểu: `https://www.googleapis.com/auth/gmail.readonly`.
+    - Đường dẫn tuyệt đối qua `pathlib` từ `backend/secrets/`.
+    - Tự động làm mới token hết hạn nếu còn `refresh_token`.
+    - Hàm `sanitize_sensitive_data` che token (`ya29.*`, `1//*`, Bearer, client_secret) khỏi log và thông báo lỗi.
+    - `search_email`: truy vấn Gmail syntax, tối đa 10 thư, chỉ lấy sender/to/subject/date/snippet — cùng định dạng với mock.
+    - Lỗi API → `logging.exception` không kèm token + `RuntimeError` thân thiện.
+  - [x] Cập nhật `backend/app/tools/email.py`:
+    - `mock_email_provider` và alias `email_provider` giữ nguyên (tương thích 100% test cũ).
+    - `get_email_provider()`: chọn mock hoặc GmailProvider theo `EMAIL_PROVIDER`; thiếu `client_secret.json` hoặc `token.json` → tự động fallback mock + cảnh báo thân thiện, không crash.
+    - `search_email_handler`: dùng provider được chọn; lỗi → trả dict thân thiện không lộ token.
+    - `create_draft_handler` và `send_email_handler` giữ nguyên dùng mock (ngoài phạm vi Phiên 1).
+  - [x] Bộ kiểm thử `backend/tests/test_gmail_provider.py` (13 test cases, mock 100%, không gọi mạng):
+    - `EMAIL_PROVIDER` mặc định là mock.
+    - `EMAIL_PROVIDER=google` nhưng thiếu `client_secret.json` → fallback mock, không crash.
+    - `EMAIL_PROVIDER=google` nhưng thiếu `token.json` → fallback mock.
+    - Import error → fallback mock.
+    - Gmail API lỗi → thông báo thân thiện, không lộ token.
+    - `sanitize_sensitive_data` che token `ya29.*` đúng.
+    - Kết quả `GmailProvider.search_email` map đúng định dạng mock.
+    - Kết quả rỗng → list rỗng (không crash).
+    - `search_email_handler` trả đúng `{query, count, emails}`.
+  - [x] Toàn bộ **44/44 tests pass** (100%): 31 test cũ + 13 test mới Gmail.
 
 ---
 
@@ -74,9 +115,6 @@
 - [ ] Thêm câu mẫu cho `FakeLLM` để nhận diện và sinh lệnh `create_event`.
 - [ ] Backend: Sinh lại dry-run `preview` (cập nhật `sample_rows_preview`) khi người dùng duyệt kèm `edited_args` cho `delete_rows`.
 - [ ] Xây dựng form "Sửa" cho `create_event` và `update_cells`.
-- [ ] Tích hợp Google Workspace API thật (OAuth 2.0, Gmail, Calendar, Sheets).
-- [ ] Tích hợp RAG thật (Vector DB, Embeddings, Document indexing).
-- [ ] *(Tùy chọn - Ngoài phạm vi bài tập)* Mở rộng cơ chế phân quyền RBAC và xác thực người dùng.
-- [ ] Tích hợp Google Workspace API thật (OAuth 2.0, Gmail, Calendar, Sheets).
-- [ ] Tích hợp RAG thật (Vector DB, Embeddings, Document indexing).
+- [ ] **Google Phiên 2**: Mở rộng Gmail (send_email, create_draft) + Google Calendar + Google Sheets với OAuth.
+- [ ] Mở rộng RAG nâng cao (Vector embeddings, Hybrid search, Chunking ngữ nghĩa).
 - [ ] *(Tùy chọn - Ngoài phạm vi bài tập)* Mở rộng cơ chế phân quyền RBAC và xác thực người dùng.
