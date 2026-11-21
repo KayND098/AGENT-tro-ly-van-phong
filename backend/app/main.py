@@ -35,6 +35,19 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     init_db()
     init_auth_tables()
+    # Cảnh báo an toàn Gmail nếu có nhiều hơn 1 user mà chưa cấu hình GMAIL_OWNER_EMAIL
+    if os.getenv("EMAIL_PROVIDER", "mock").strip().lower() == "google" and not os.getenv("GMAIL_OWNER_EMAIL", "").strip():
+        try:
+            with get_connection() as conn:
+                user_count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+                if user_count > 1:
+                    logger.warning(
+                        "⚠️  CẢNH BÁO BẢO MẬT: EMAIL_PROVIDER=google nhưng chưa thiết lập GMAIL_OWNER_EMAIL "
+                        "trong khi hệ thống có %d người dùng. Các tài khoản đều sẽ dùng chung token Gmail!",
+                        user_count,
+                    )
+        except Exception:
+            pass
     yield
 
 app = FastAPI(
@@ -90,6 +103,7 @@ def api_info():
         "docs_url": "/docs",
         "endpoints": {
             "chat": "POST /chat",
+            "chat_clear": "POST /chat/clear",
             "pending_actions": "GET /actions/pending",
             "approve_action": "POST /actions/{id}/approve",
             "reject_action": "POST /actions/{id}/reject",
@@ -115,6 +129,18 @@ def ui_page():
     return HTMLResponse(content=HTML_PAGE)
 
 
+def _extract_user(user: Any) -> Optional[Dict[str, Any]]:
+    if isinstance(user, dict):
+        return user
+    if hasattr(user, "id"):
+        return {"id": getattr(user, "id"), "email": getattr(user, "email", "")}
+    return None
+
+def _extract_user_id(user: Any) -> Optional[int]:
+    u = _extract_user(user)
+    return u["id"] if u and "id" in u else None
+
+
 @app.post("/chat")
 def chat(request: ChatRequest, _user=Depends(require_user), req: Request = None):
     """
@@ -123,9 +149,10 @@ def chat(request: ChatRequest, _user=Depends(require_user), req: Request = None)
     """
     if req is not None:
         _check_csrf(req)
+    user_info = _extract_user(_user)
     raw_messages = [{"role": m.role, "content": m.content} for m in request.messages]
     try:
-        response = agent_loop.run(messages=raw_messages)
+        response = agent_loop.run(messages=raw_messages, user=user_info)
     except Exception as exc:
         logger.exception("Unexpected error in agent_loop.run")
         return {
@@ -136,17 +163,33 @@ def chat(request: ChatRequest, _user=Depends(require_user), req: Request = None)
     return response
 
 
+@app.post("/chat/clear")
+@app.post("/chat/new")
+def clear_chat(_user=Depends(require_user), req: Request = None):
+    """
+    Xóa lịch sử hội thoại của chính người dùng hiện tại trong bộ nhớ.
+    """
+    if req is not None:
+        _check_csrf(req)
+    user_id = _extract_user_id(_user)
+    if user_id is not None:
+        agent_loop.clear_history(user_id=user_id)
+    return {"success": True, "message": "Đã làm mới cuộc trò chuyện."}
+
+
 @app.get("/actions/pending")
 def list_pending(_user=Depends(require_user)):
-    """Lấy danh sách tất cả các hành động đang chờ xác nhận."""
-    return {"actions": confirm_service.list_pending_actions()}
+    """Lấy danh sách các hành động đang chờ xác nhận của người dùng hiện tại."""
+    user_id = _extract_user_id(_user)
+    return {"actions": confirm_service.list_pending_actions(user_id=user_id)}
 
 
 @app.get("/actions/{action_id}")
 def get_action_detail(action_id: str, _user=Depends(require_user)):
-    """Lấy chi tiết một pending action."""
+    """Lấy chi tiết một pending action của người dùng hiện tại."""
+    user_id = _extract_user_id(_user)
     try:
-        action = confirm_service.get_action(action_id)
+        action = confirm_service.get_action(action_id, user_id=user_id)
         return action
     except ActionNotFoundError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
@@ -156,13 +199,15 @@ def get_action_detail(action_id: str, _user=Depends(require_user)):
 def approve_action(action_id: str, request: Optional[ApproveRequest] = None, _user=Depends(require_user)):
     """
     Duyệt hành động chờ.
+    - Chỉ chủ sở hữu mới có quyền duyệt.
     - Chống duyệt đúp (idempotency).
     - Hết hạn sau 10 phút.
     - Hỗ trợ tham số tùy chọn edited_args để ghi đè tham số gốc.
     """
+    user_id = _extract_user_id(_user)
     edited_args = request.edited_args if request else None
     try:
-        result = confirm_service.approve_action(action_id=action_id, edited_args=edited_args)
+        result = confirm_service.approve_action(action_id=action_id, edited_args=edited_args, user_id=user_id)
         return {"success": True, "action": result}
     except ActionNotFoundError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
@@ -181,10 +226,11 @@ def approve_action(action_id: str, request: Optional[ApproveRequest] = None, _us
 
 @app.post("/actions/{action_id}/reject")
 def reject_action(action_id: str, request: Optional[RejectRequest] = None, _user=Depends(require_user)):
-    """Hủy bỏ hoặc từ chối hành động chờ."""
+    """Hủy bỏ hoặc từ chối hành động chờ (chỉ chủ sở hữu)."""
+    user_id = _extract_user_id(_user)
     reason = request.reason if request else None
     try:
-        result = confirm_service.reject_action(action_id=action_id, reason=reason)
+        result = confirm_service.reject_action(action_id=action_id, reason=reason, user_id=user_id)
         return {"success": True, "action": result}
     except ActionNotFoundError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
@@ -196,9 +242,13 @@ def reject_action(action_id: str, request: Optional[RejectRequest] = None, _user
 
 @app.get("/audit")
 def get_audit_logs(limit: int = 50, _user=Depends(require_user)):
-    """Xem vết kiểm toán gần nhất."""
+    """Xem vết kiểm toán của người dùng hiện tại."""
+    user_id = _extract_user_id(_user)
     with get_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM audit_log ORDER BY id DESC LIMIT ?", (limit,))
+        if user_id is not None:
+            cursor.execute("SELECT * FROM audit_log WHERE user_id = ? ORDER BY id DESC LIMIT ?", (user_id, limit))
+        else:
+            cursor.execute("SELECT * FROM audit_log ORDER BY id DESC LIMIT ?", (limit,))
         rows = cursor.fetchall()
         return {"logs": [dict(r) for r in rows]}

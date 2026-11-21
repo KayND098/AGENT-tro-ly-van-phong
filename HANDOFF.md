@@ -91,17 +91,90 @@ Tài liệu bàn giao nhanh trạng thái hiện tại của dự án để ti�
   - Bộ kiểm thử `backend/tests/test_gmail_provider.py` (13 tests, mock 100%, không gọi mạng thật).
   - Toàn bộ **44/44 tests pass** (100%).
 
+- **Phiên 1 của "Đa người dùng": Đăng nhập Google (chỉ danh tính) & Phiên làm việc**:
+  - **Mục tiêu**: Xác thực danh tính người dùng và quản lý phiên đăng nhập an toàn, tách biệt với việc đọc Gmail (phiên sau).
+  - **Bảng SQLite mới** (`backend/app/auth/db_auth.py`):
+    - `users`: `id`, `google_sub` (UNIQUE), `email`, `name`, `picture`, `created_at`, `last_login`.
+    - `sessions`: `id_hash` (PRIMARY KEY), `user_id`, `created_at`, `expires_at`.
+    - Khởi tạo idempotent tự động khi backend khởi động (`init_auth_tables`).
+  - **Bảo mật Cookie & Phiên**:
+    - Cookie `session_id` 32 bytes ngẫu nhiên (`secrets.token_hex(32)`).
+    - Database **chỉ lưu SHA-256 hash** của cookie, không bao giờ lưu token gốc.
+    - Thuộc tính cookie: `HttpOnly=True`, `SameSite=Lax`, `Secure` (tự động bật nếu `APP_BASE_URL` bắt đầu bằng `https`), `path="/"`.
+    - Hạn phiên mặc định theo `SESSION_DAYS` (30 ngày), tự động gia hạn khi có request hợp lệ.
+  - **Xác thực Google OAuth 2.0 Web Application**:
+    - Scope tối thiểu: `openid`, `email`, `profile` — **tuyệt đối không xin quyền Gmail**.
+    - Bảo vệ chống CSRF luồng OAuth: `state` ngẫu nhiên + PKCE (RFC 7636, S256) + `nonce`, lưu trong bộ nhớ kèm TTL 10 phút.
+    - Xác minh `id_token` bằng thư viện chính thức `google-auth` (`verify_oauth2_token` kiểm tra chữ ký Google, `audience` khớp Client ID, hạn sử dụng, và `nonce`).
+    - Hỗ trợ lọc tài khoản qua biến môi trường `ALLOWED_EMAILS`.
+  - **Endpoints API** (`backend/app/auth/router.py`):
+    - `GET /auth/google/login`: Chuyển hướng sang Google OAuth consent screen.
+    - `GET /auth/google/callback`: Xử lý xác thực, cấp phiên và đặt cookie.
+    - `GET /auth/me`: Lấy thông tin user hiện tại (`id`, `email`, `name`, `picture`) hoặc 401.
+    - `POST /auth/logout`: Xóa phiên phía server và xóa cookie trình duyệt.
+  - **Bảo vệ Routes & CSRF**:
+    - Dependency `require_user` bảo vệ các route `/chat`, `/actions/*`, `/audit`.
+    - Route `/health` công khai.
+    - Route POST yêu cầu header `X-Requested-With` và `Origin` hợp lệ (trả 403 nếu thiếu/sai).
+    - Trang tĩnh cũ `"/"` (`ui.py`) tiếp tục duy trì, React SPA trên frontend là giao diện tương tác chính.
+  - **Frontend (Material Design 3)**:
+    - Màn hình đăng nhập `LoginPage.tsx` (hiện khi chưa đăng nhập): Logo, nút "Đăng nhập bằng Google", dòng ghi chú *"Chỉ dùng tài khoản được cấp quyền thử nghiệm"*, hiển thị lỗi nếu có.
+    - `TopBar.tsx`: Hiển thị Avatar (ảnh hoặc chữ cái đầu) và Email người dùng, dropdown menu có nút "Đăng xuất".
+    - Tự động đính kèm cookie (`credentials: 'same-origin'`) và header `X-Requested-With` vào mọi request API; khi gặp 401 tự động chuyển về màn hình đăng nhập kèm thông báo.
+    - `vite.config.ts`: Cấu hình proxy `/auth` trỏ tới `http://127.0.0.1:8000`.
+  - **Kiểm thử**: Bộ test `backend/tests/test_auth.py` (14 test cases mock 100%, không gọi mạng thật).
+  - Toàn bộ **58/58 tests pass** (100%) và `npm run build` thành công.
+
+- **Phiên 2 của "Đa người dùng": Tách Biệt Dữ Liệu Theo Người Dùng**:
+  - **Mục tiêu**: Đảm bảo người này không thể xem, duyệt, hủy hay sửa thẻ xác nhận, nhật ký kiểm toán, lịch sử chat của người khác.
+  - **DB Migration Idempotent** (`backend/app/db.py`):
+    - Thêm cột `user_id INTEGER` vào `pending_actions` và `audit_log` (`ALTER TABLE ... ADD COLUMN user_id INTEGER;` nếu chưa có).
+    - Tạo các index `idx_pending_user_id` trên `pending_actions(user_id)` và `idx_audit_user_id` trên `audit_log(user_id)`.
+    - **Cách xử lý dữ liệu cũ**: Các bản ghi cũ không có `user_id` (mang giá trị `NULL`) được coi là "không thuộc ai". Người dùng thông thường khi đăng nhập sẽ không thấy các bản ghi này trong danh sách `/actions/pending`, `/audit`. Nếu truy cập trực tiếp bằng ID sẽ nhận mã lỗi 404 Not Found.
+    - Cập nhật hàm `record_audit_log` hỗ trợ lưu `user_id`.
+  - **Confirm Service Kiểm Soát Quyền Sở Hữu** (`backend/app/confirm/service.py`):
+    - Các phương thức `create_pending_action`, `get_action`, `list_pending_actions`, `approve_action`, `reject_action` đều nhận và kiểm tra `user_id`.
+    - Thao tác trên thẻ của người khác (hoặc thẻ không thuộc ai) trả về `ActionNotFoundError` (FastAPI map thành 404 Not Found, không dùng 403 để không làm lộ sự tồn tại của thẻ).
+    - Đồng thời tự động ghi sự kiện `UNAUTHORIZED_ACCESS` vào `audit_log` với `original_args={}` (tuyệt đối không ghi nội dung/tham số gốc của thẻ).
+    - Bảo toàn 100% cơ chế: Chống duyệt đúp (idempotent), TTL 10 phút, và hỗ trợ `edited_args`.
+  - **Khóa Quyền Sở Hữu Trên Các Tuyến API** (`backend/app/main.py`):
+    - Tất cả các route nghiệp vụ chỉ lấy `user_id` từ `require_user`, tuyệt đối KHÔNG nhận `user_id` từ client:
+      1. `GET /actions/pending`: Chỉ trả thẻ chờ của người dùng đang đăng nhập.
+      2. `GET /actions/{action_id}`: Chỉ chủ sở hữu mới xem được; thẻ người khác trả 404.
+      3. `POST /actions/{action_id}/approve`: Chỉ chủ sở hữu mới duyệt được (kể cả khi gửi kèm `edited_args`); người khác duyệt trả 404 và không làm thay đổi trạng thái thẻ.
+      4. `POST /actions/{action_id}/reject`: Chỉ chủ sở hữu mới hủy được; người khác hủy trả 404.
+      5. `GET /audit`: Chỉ trả nhật ký hoạt động của chính người dùng hiện tại.
+      6. `POST /chat`: Gắn thông tin người dùng vào phiên và truyền tới tool/pending action.
+      7. `POST /chat/clear` (alias `POST /chat/new`): Xóa lịch sử hội thoại của riêng người dùng đang đăng nhập.
+  - **Lịch Sử Hội Thoại Agent Trong Bộ Nhớ** (`backend/app/agent/history.py` & `loop.py`):
+    - `ConversationHistoryManager`: Tách biệt lịch sử chat theo `user_id` trong bộ nhớ.
+    - Giới hạn dung lượng: Tối đa 50 tin nhắn mỗi người theo cơ chế cửa sổ trượt (sliding window).
+    - Tự động xóa phiên không hoạt động quá 24 giờ (`prune_inactive`).
+    - Nút "+ Cuộc trò chuyện mới" gọi `POST /chat/clear` chỉ xóa lịch sử của chính người đó, không ảnh hưởng đến người dùng khác.
+  - **Chốt Chặn Gmail & Truyền Thông Tin Người Dùng**:
+    - `agent_loop.run` truyền thông tin người dùng (`id`, `email`) tới các tool handler qua `RegisteredTool.execute(user=user, ...)`.
+    - Biến môi trường tùy chọn `GMAIL_OWNER_EMAIL`: Khi `EMAIL_PROVIDER=google` và người dùng hiện tại KHÔNG phải `GMAIL_OWNER_EMAIL`, tool `search_email` chặn đọc file `token.json` chung và trả thông báo thân thiện: *"Tài khoản này chưa kết nối Gmail"*.
+    - Khi `GMAIL_OWNER_EMAIL` để trống, hệ thống giữ hành vi cũ nhưng tự động ghi log cảnh báo an toàn khi khởi động nếu phát hiện có nhiều hơn 1 user trong database.
+    - Cập nhật `.env.example`.
+  - **Tài Liệu RAG (backend/data/docs)**:
+    - Tiếp tục là kho tài liệu quy định nội bộ dùng chung toàn công ty cho mọi người dùng (quy trình nghỉ phép, công tác phí, bảo mật,...), không phân tách theo người dùng.
+  - **Frontend (React + Vite + MD3)**:
+    - Giao diện giữ nguyên, danh sách "Cần xác nhận", badge đếm số lượng, và trang Nhật ký hoạt động đồng bộ chính xác theo dữ liệu đã lọc của người dùng hiện tại.
+    - Nút "+ Cuộc trò chuyện mới" gọi `POST /chat/clear` và xóa state messages nội bộ.
+  - **Kiểm Thử**:
+    - Bộ test đa người dùng mới `backend/tests/test_multiuser_isolation.py` gồm 9 test cases đáp ứng đầy đủ yêu cầu (mock 100%, không gọi mạng thật).
+    - Toàn bộ **67/67 tests pass** (100%) và `npm run build` thành công.
+
 ---
 
 ## 2. CHƯA LÀM (VIỆC CÒN NỢ)
 
+- [ ] **Đa người dùng - Phiên 3**: Kết nối Gmail và Google Workspace riêng biệt cho từng người dùng.
 - [ ] **Phiên 2B của LLM thật**: Cơ chế retry khi gặp lỗi 503/429 + cấu hình mô hình dự phòng `GEMINI_FALLBACK_MODEL`.
 - [ ] Thêm câu mẫu cho `FakeLLM` để nhận diện và sinh lệnh `create_event`.
 - [ ] Backend: Sinh lại dry-run `preview` (cập nhật `sample_rows_preview`) khi người dùng duyệt kèm `edited_args` cho `delete_rows`.
 - [ ] Form / Dialog "Sửa" cho `create_event` và `update_cells`.
-- [ ] **Google Phiên 2**: Mở rộng Gmail (send_email, create_draft) + Google Calendar + Google Sheets với OAuth.
 - [ ] Mở rộng RAG nâng cao (Vector DB Chroma / Qdrant, embeddings, semantic chunking).
-- [ ] *(Tùy chọn - Ngoài phạm vi bài tập)* Mở rộng cơ chế phân quyền RBAC và xác thực người dùng đăng nhập.
 
 ---
 
@@ -116,7 +189,7 @@ python -m uvicorn app.main:app --reload --port 8000
 cd frontend
 npm.cmd run dev
 
-# 3. Kiểm thử Backend (44 tests)
+# 3. Kiểm thử Backend (67 tests)
 python -m pytest backend/tests -v
 
 # 4. Kiểm thử Frontend Build

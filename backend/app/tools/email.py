@@ -147,12 +147,29 @@ def get_email_provider():
         return mock_email_provider
 
 
-def search_email_handler(query: str) -> Dict[str, Any]:
+def search_email_handler(query: str, user: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     Handler tìm kiếm email.
     Dùng provider chọn theo EMAIL_PROVIDER. Lỗi API trả thông báo thân thiện, không crash.
     Nội dung trả về được vòng lặp Agent đánh dấu là DỮ LIỆU (cơ chế hiện tại giữ nguyên).
+    Chốt chặn an toàn: Nếu EMAIL_PROVIDER=google và GMAIL_OWNER_EMAIL được đặt,
+    chỉ tài khoản khớp mới được đọc Gmail token.json chung.
     """
+    provider_name = os.getenv("EMAIL_PROVIDER", "mock").strip().lower()
+    gmail_owner = os.getenv("GMAIL_OWNER_EMAIL", "").strip().lower()
+
+    if provider_name == "google" and gmail_owner:
+        user_email = (user.get("email", "") if isinstance(user, dict) else "").strip().lower()
+        if user_email != gmail_owner:
+            logger.info("Chốt chặn an toàn: Tài khoản '%s' không phải GMAIL_OWNER_EMAIL ('%s').", user_email, gmail_owner)
+            return {
+                "query": query,
+                "count": 0,
+                "emails": [],
+                "error": "Tài khoản này chưa kết nối Gmail",
+                "message": "Tài khoản này chưa kết nối Gmail",
+            }
+
     provider = get_email_provider()
     try:
         emails = provider.search_email(query=query)

@@ -35,6 +35,7 @@ def init_db(db_path: Optional[str] = None) -> None:
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS pending_actions (
                 id TEXT PRIMARY KEY,
+                user_id INTEGER,
                 tool_name TEXT NOT NULL,
                 original_args TEXT NOT NULL,
                 edited_args TEXT,
@@ -51,6 +52,7 @@ def init_db(db_path: Optional[str] = None) -> None:
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS audit_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
                 action_id TEXT,
                 action_type TEXT NOT NULL,
                 tool_name TEXT NOT NULL,
@@ -62,8 +64,21 @@ def init_db(db_path: Optional[str] = None) -> None:
             );
         """)
 
+        # Migration idempotent cho DB đã tồn tại: thêm cột user_id nếu chưa có
+        cursor.execute("PRAGMA table_info(pending_actions)")
+        pending_cols = [row["name"] for row in cursor.fetchall()]
+        if "user_id" not in pending_cols:
+            cursor.execute("ALTER TABLE pending_actions ADD COLUMN user_id INTEGER;")
+
+        cursor.execute("PRAGMA table_info(audit_log)")
+        audit_cols = [row["name"] for row in cursor.fetchall()]
+        if "user_id" not in audit_cols:
+            cursor.execute("ALTER TABLE audit_log ADD COLUMN user_id INTEGER;")
+
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_pending_status ON pending_actions(status);")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_pending_user_id ON pending_actions(user_id);")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_action_id ON audit_log(action_id);")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_user_id ON audit_log(user_id);")
         conn.commit()
 
 def record_audit_log(
@@ -74,6 +89,7 @@ def record_audit_log(
     action_id: Optional[str] = None,
     edited_args: Optional[Dict[str, Any]] = None,
     result: Optional[Any] = None,
+    user_id: Optional[int] = None,
     db_path: Optional[str] = None,
 ) -> int:
     init_db(db_path)  # idempotent: đảm bảo bảng tồn tại trước khi ghi
@@ -82,10 +98,11 @@ def record_audit_log(
         cursor = conn.cursor()
         cursor.execute(
             """
-            INSERT INTO audit_log (action_id, action_type, tool_name, original_args, edited_args, result, status, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO audit_log (user_id, action_id, action_type, tool_name, original_args, edited_args, result, status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
+                user_id,
                 action_id,
                 action_type,
                 tool_name,

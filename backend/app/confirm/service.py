@@ -33,11 +33,40 @@ class ConfirmService:
         data["result"] = json.loads(data["result"]) if data.get("result") else None
         return data
 
+    def _check_ownership(self, row, user_id: Optional[int], action_id: str, conn: Optional[Any] = None) -> None:
+        """
+        Kiểm tra quyền sở hữu của user đối với pending action.
+        Nếu không khớp: rollback (nếu có conn), ghi audit log UNAUTHORIZED_ACCESS
+        (không ghi nội dung) và raise ActionNotFoundError (trả 404, không dùng 403 để không lộ thẻ).
+        """
+        row_user_id = row["user_id"]
+        is_unauthorized = False
+        if user_id is not None and row_user_id != user_id:
+            is_unauthorized = True
+        elif user_id is None and row_user_id is not None:
+            is_unauthorized = True
+
+        if is_unauthorized:
+            if conn:
+                conn.rollback()
+            record_audit_log(
+                action_type="UNAUTHORIZED_ACCESS",
+                tool_name=row["tool_name"],
+                original_args={},
+                status="REJECTED",
+                action_id=action_id,
+                user_id=user_id,
+                result={"error": "unauthorized_access"},
+                db_path=self.db_path,
+            )
+            raise ActionNotFoundError(f"Không tìm thấy Pending Action với id: {action_id}")
+
     def create_pending_action(
         self,
         tool_name: str,
         args: Dict[str, Any],
         risk_level: RiskLevel = RiskLevel.CONFIRM,
+        user_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         from ..db import init_db as _init_db
         _init_db(self.db_path)  # idempotent: CREATE TABLE IF NOT EXISTS
@@ -60,12 +89,13 @@ class ConfirmService:
             cursor.execute(
                 """
                 INSERT INTO pending_actions (
-                    id, tool_name, original_args, edited_args, preview,
+                    id, user_id, tool_name, original_args, edited_args, preview,
                     risk_level, status, result, created_at, expires_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     action_id,
+                    user_id,
                     tool_name,
                     json.dumps(args, ensure_ascii=False),
                     None,
@@ -86,12 +116,14 @@ class ConfirmService:
             original_args=args,
             status="PENDING",
             action_id=action_id,
+            user_id=user_id,
             result={"preview": preview_data, "expires_at": expires_iso},
             db_path=self.db_path,
         )
 
         return {
             "id": action_id,
+            "user_id": user_id,
             "tool_name": tool_name,
             "original_args": args,
             "edited_args": None,
@@ -104,13 +136,15 @@ class ConfirmService:
             "updated_at": now_iso,
         }
 
-    def get_action(self, action_id: str) -> Dict[str, Any]:
+    def get_action(self, action_id: str, user_id: Optional[int] = None) -> Dict[str, Any]:
         with get_connection(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM pending_actions WHERE id = ?", (action_id,))
             row = cursor.fetchone()
             if not row:
                 raise ActionNotFoundError(f"Không tìm thấy Pending Action với id: {action_id}")
+
+            self._check_ownership(row, user_id, action_id)
 
             data = self._parse_row(row)
 
@@ -133,20 +167,24 @@ class ConfirmService:
                     original_args=data["original_args"],
                     status="EXPIRED",
                     action_id=action_id,
+                    user_id=data.get("user_id"),
                     db_path=self.db_path,
                 )
 
             return data
 
-    def list_pending_actions(self) -> List[Dict[str, Any]]:
+    def list_pending_actions(self, user_id: Optional[int] = None) -> List[Dict[str, Any]]:
         with get_connection(self.db_path) as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM pending_actions ORDER BY created_at DESC")
+            if user_id is not None:
+                cursor.execute("SELECT * FROM pending_actions WHERE user_id = ? ORDER BY created_at DESC", (user_id,))
+            else:
+                cursor.execute("SELECT * FROM pending_actions WHERE user_id IS NULL ORDER BY created_at DESC")
             rows = cursor.fetchall()
 
         results = []
         for r in rows:
-            action = self.get_action(r["id"])
+            action = self.get_action(r["id"], user_id=user_id)
             if action["status"] == "PENDING":
                 results.append(action)
         return results
@@ -164,6 +202,7 @@ class ConfirmService:
         self,
         action_id: str,
         edited_args: Optional[Dict[str, Any]] = None,
+        user_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         now = datetime.now(timezone.utc)
         now_iso = now.isoformat()
@@ -177,6 +216,8 @@ class ConfirmService:
             if not row:
                 conn.rollback()
                 raise ActionNotFoundError(f"Không tìm thấy Pending Action với id: {action_id}")
+
+            self._check_ownership(row, user_id, action_id, conn=conn)
 
             data = self._parse_row(row)
 
@@ -211,6 +252,7 @@ class ConfirmService:
                     original_args=data["original_args"],
                     status="EXPIRED",
                     action_id=action_id,
+                    user_id=data.get("user_id"),
                     db_path=self.db_path,
                 )
                 raise ActionExpiredError(f"Action '{action_id}' đã hết hạn sau 10 phút.")
@@ -263,11 +305,13 @@ class ConfirmService:
             result=exec_result,
             status="SUCCESS",
             action_id=action_id,
+            user_id=data.get("user_id"),
             db_path=self.db_path,
         )
 
         return {
             "id": action_id,
+            "user_id": data.get("user_id"),
             "status": "APPROVED",
             "tool_name": tool_name,
             "executed_args": execution_args,
@@ -277,7 +321,7 @@ class ConfirmService:
             "updated_at": now_iso,
         }
 
-    def reject_action(self, action_id: str, reason: Optional[str] = None) -> Dict[str, Any]:
+    def reject_action(self, action_id: str, reason: Optional[str] = None, user_id: Optional[int] = None) -> Dict[str, Any]:
         now = datetime.now(timezone.utc)
         now_iso = now.isoformat()
 
@@ -287,6 +331,8 @@ class ConfirmService:
             row = cursor.fetchone()
             if not row:
                 raise ActionNotFoundError(f"Không tìm thấy Pending Action với id: {action_id}")
+
+            self._check_ownership(row, user_id, action_id)
 
             data = self._parse_row(row)
 
@@ -309,11 +355,13 @@ class ConfirmService:
             result={"reason": reason or "Người dùng hủy bỏ"},
             status="REJECTED",
             action_id=action_id,
+            user_id=data.get("user_id"),
             db_path=self.db_path,
         )
 
         return {
             "id": action_id,
+            "user_id": data.get("user_id"),
             "status": "REJECTED",
             "message": "Đã hủy bỏ hành động thành công.",
             "updated_at": now_iso,

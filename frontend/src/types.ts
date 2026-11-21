@@ -1,5 +1,12 @@
 export type Role = 'user' | 'assistant' | 'system';
 
+export interface User {
+  id: number;
+  email: string;
+  name: string;
+  picture?: string | null;
+}
+
 export interface PendingAction {
   id: string;
   tool_name: string;

@@ -2,6 +2,7 @@ import logging
 from typing import List, Dict, Any, Optional
 
 from .llm import LLMClient, FakeLLM, fake_llm, get_llm
+from .history import history_manager, ConversationHistoryManager
 from ..tools.registry import registry, RiskLevel, ToolRegistry
 from ..tools import email, calendar, sheets, docs
 from ..confirm.service import confirm_service, ConfirmService
@@ -13,22 +14,43 @@ class AgentLoop:
         llm: Optional[LLMClient] = None,
         tool_registry: Optional[ToolRegistry] = None,
         confirm_svc: Optional[ConfirmService] = None,
+        history_mgr: Optional[ConversationHistoryManager] = None,
     ):
         self.llm = llm
         self.registry = tool_registry or registry
         self.confirm_service = confirm_svc or confirm_service
+        self.history_manager = history_mgr or history_manager
 
     def get_active_llm(self) -> LLMClient:
         return self.llm or get_llm()
 
-    def run(self, messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def clear_history(self, user_id: int, conversation_id: Optional[str] = None) -> None:
+        """Xóa lịch sử hội thoại của người dùng."""
+        self.history_manager.clear_history(user_id=user_id, conversation_id=conversation_id)
+
+    def get_history(self, user_id: int, conversation_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Lấy lịch sử hội thoại của người dùng."""
+        return self.history_manager.get_history(user_id=user_id, conversation_id=conversation_id)
+
+    def run(
+        self,
+        messages: List[Dict[str, Any]],
+        user: Optional[Dict[str, Any]] = None,
+        conversation_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """
         Thực hiện một chu kỳ vòng lặp xử lý tin nhắn:
+        - Nhận thông tin người dùng (id, email) để truyền vào tool và confirm service.
+        - Tách biệt lịch sử hội thoại theo user_id (giới hạn N tin, TTL 24h).
         - Với FakeLLM: Chạy đơn vòng kịch bản mẫu phục vụ kiểm thử khung skeleton.
         - Với GeminiLLM / LLM thực: Hỗ trợ function calling đa vòng (tối đa 3 vòng),
           chống lặp vô hạn, kiểm tra tool hợp lệ, validate schema tham số.
           MỌI tool mức CONFIRM tuyệt đối không chạy trực tiếp mà tạo pending_action.
         """
+        user_id = user.get("id") if isinstance(user, dict) else None
+        if user_id is not None and messages:
+            self.history_manager.set_history(user_id=user_id, messages=messages, conversation_id=conversation_id)
+
         available_tools = self.registry.list_tools()
         active_llm = self.get_active_llm()
 
@@ -39,12 +61,15 @@ class AgentLoop:
             content = llm_response.get("content", "")
 
             if not tool_calls:
-                return {
+                res = {
                     "type": "text",
                     "content": content,
                     "tool_calls": [],
                     "pending_action": None,
                 }
+                if user_id is not None:
+                    self.history_manager.add_message(user_id, {"role": "assistant", "content": content}, conversation_id)
+                return res
 
             tool_call = tool_calls[0]
             tool_name = tool_call["name"]
@@ -71,15 +96,16 @@ class AgentLoop:
             # Tác vụ READ
             if tool.risk_level == RiskLevel.READ:
                 try:
-                    result = tool.execute(**tool_args)
+                    result = tool.execute(user=user, **tool_args)
                     record_audit_log(
                         action_type="EXECUTE_READ",
                         tool_name=tool_name,
                         original_args=tool_args,
                         result=result,
                         status="SUCCESS",
+                        user_id=user_id,
                     )
-                    return {
+                    res = {
                         "type": "tool_executed",
                         "content": content,
                         "tool_name": tool_name,
@@ -87,6 +113,9 @@ class AgentLoop:
                         "result": result,
                         "pending_action": None,
                     }
+                    if user_id is not None:
+                        self.history_manager.add_message(user_id, {"role": "assistant", "content": content, "tool_name": tool_name}, conversation_id)
+                    return res
                 except Exception as e:
                     return {
                         "type": "error",
@@ -101,14 +130,18 @@ class AgentLoop:
                         tool_name=tool_name,
                         args=tool_args,
                         risk_level=RiskLevel.CONFIRM,
+                        user_id=user_id,
                     )
-                    return {
+                    res = {
                         "type": "confirm_required",
                         "content": content,
                         "tool_name": tool_name,
                         "risk_level": "confirm",
                         "pending_action": pending_action,
                     }
+                    if user_id is not None:
+                        self.history_manager.add_message(user_id, {"role": "assistant", "content": content, "pending_action_id": pending_action.get("id")}, conversation_id)
+                    return res
                 except Exception as e:
                     return {
                         "type": "error",
@@ -119,15 +152,16 @@ class AgentLoop:
             # Tác vụ REVERSIBLE
             if tool.risk_level == RiskLevel.REVERSIBLE:
                 try:
-                    result = tool.execute(**tool_args)
+                    result = tool.execute(user=user, **tool_args)
                     record_audit_log(
                         action_type="EXECUTE_REVERSIBLE",
                         tool_name=tool_name,
                         original_args=tool_args,
                         result=result,
                         status="SUCCESS",
+                        user_id=user_id,
                     )
-                    return {
+                    res = {
                         "type": "tool_executed",
                         "content": content,
                         "tool_name": tool_name,
@@ -135,6 +169,9 @@ class AgentLoop:
                         "result": result,
                         "pending_action": None,
                     }
+                    if user_id is not None:
+                        self.history_manager.add_message(user_id, {"role": "assistant", "content": content, "tool_name": tool_name}, conversation_id)
+                    return res
                 except Exception as e:
                     return {
                         "type": "error",
@@ -172,7 +209,7 @@ class AgentLoop:
             if not tool_calls:
                 if last_tool_name is not None:
                     # Trả về kết quả sau khi đã thực thi tool và LLM diễn đạt lại bằng tiếng Việt
-                    return {
+                    res = {
                         "type": "tool_executed",
                         "content": content or f"Đã thực hiện xong công cụ '{last_tool_name}'.",
                         "tool_name": last_tool_name,
@@ -180,12 +217,18 @@ class AgentLoop:
                         "result": last_tool_result,
                         "pending_action": None,
                     }
-                return {
+                    if user_id is not None:
+                        self.history_manager.add_message(user_id, {"role": "assistant", "content": res["content"], "tool_name": last_tool_name}, conversation_id)
+                    return res
+                res = {
                     "type": "text",
                     "content": content,
                     "tool_calls": [],
                     "pending_action": None,
                 }
+                if user_id is not None:
+                    self.history_manager.add_message(user_id, {"role": "assistant", "content": content}, conversation_id)
+                return res
 
             # A. Kiểm tra nếu có bất kỳ tool nào là CONFIRM: TUYỆT ĐỐI không chạy trực tiếp
             # Tạo pending_action qua ConfirmService, trả thẻ xác nhận cho frontend và dừng vòng lặp
@@ -214,6 +257,7 @@ class AgentLoop:
                         tool_name=tool_name,
                         args=tool_args,
                         risk_level=RiskLevel.CONFIRM,
+                        user_id=user_id,
                     )
                     # Chỉ báo đã tạo yêu cầu chờ xác nhận, không nói như thể đã thực hiện
                     if content and ("xác nhận" in content.lower() or "kiểm tra" in content.lower() or "chờ" in content.lower()):
@@ -221,13 +265,16 @@ class AgentLoop:
                     else:
                         confirm_message = f"Tôi đã chuẩn bị yêu cầu '{tool_name}' và tạo thẻ chờ bạn xác nhận bên dưới trước khi thực hiện."
 
-                    return {
+                    res = {
                         "type": "confirm_required",
                         "content": confirm_message,
                         "tool_name": tool_name,
                         "risk_level": "confirm",
                         "pending_action": pending_action,
                     }
+                    if user_id is not None:
+                        self.history_manager.add_message(user_id, {"role": "assistant", "content": confirm_message, "pending_action_id": pending_action.get("id")}, conversation_id)
+                    return res
                 except Exception as e:
                     logging.exception("Không thể tạo pending action cho '%s'", tool_name)
                     return {
@@ -267,7 +314,7 @@ class AgentLoop:
                 tool = self.registry.get(tc_name)
 
                 try:
-                    result = tool.execute(**tc_args)
+                    result = tool.execute(user=user, **tc_args)
                     action_type = "EXECUTE_READ" if tool.risk_level == RiskLevel.READ else "EXECUTE_REVERSIBLE"
                     record_audit_log(
                         action_type=action_type,
@@ -275,6 +322,7 @@ class AgentLoop:
                         original_args=tc_args,
                         result=result,
                         status="SUCCESS",
+                        user_id=user_id,
                     )
                     last_tool_name = tc_name
                     last_tool_risk = tool.risk_level.value
@@ -319,7 +367,7 @@ class AgentLoop:
 
         # Nếu đạt giới hạn tối đa 3 vòng mà chưa kết thúc bằng văn bản thuần
         if last_tool_name is not None:
-            return {
+            res = {
                 "type": "tool_executed",
                 "content": last_content or f"Đã hoàn thành công cụ '{last_tool_name}'.",
                 "tool_name": last_tool_name,
@@ -327,12 +375,18 @@ class AgentLoop:
                 "result": last_tool_result,
                 "pending_action": None,
             }
+            if user_id is not None:
+                self.history_manager.add_message(user_id, {"role": "assistant", "content": res["content"], "tool_name": last_tool_name}, conversation_id)
+            return res
 
-        return {
+        res = {
             "type": "text",
             "content": last_content or "Đã hoàn thành xử lý yêu cầu.",
             "tool_calls": [],
             "pending_action": None,
         }
+        if user_id is not None:
+            self.history_manager.add_message(user_id, {"role": "assistant", "content": res["content"]}, conversation_id)
+        return res
 
 agent_loop = AgentLoop()

@@ -14,7 +14,10 @@ export const AuditLogView = ({ apiUrl }: AuditLogViewProps) => {
   const fetchLogs = async () => {
     setLoading(true);
     try {
-      const res = await fetch(`${apiUrl}/audit`);
+      const res = await fetch(`${apiUrl}/audit`, {
+        credentials: 'same-origin',
+        headers: { 'X-Requested-With': 'XMLHttpRequest' },
+      });
       if (res.ok) {
         const data = await res.json();
         setLogs(data.logs || []);

@@ -31,8 +31,15 @@ class RegisteredTool:
         self.execute_fn = execute_fn
         self.dry_run_fn = dry_run_fn
 
-    def execute(self, **kwargs) -> Any:
-        return self.execute_fn(**kwargs)
+    def execute(self, user: Optional[Dict[str, Any]] = None, **kwargs) -> Any:
+        import inspect
+        sig = inspect.signature(self.execute_fn)
+        call_kwargs = dict(kwargs)
+        if "user" in sig.parameters:
+            call_kwargs["user"] = user
+        elif any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+            call_kwargs["user"] = user
+        return self.execute_fn(**call_kwargs)
 
     def preview(self, **kwargs) -> Dict[str, Any]:
         if self.dry_run_fn:

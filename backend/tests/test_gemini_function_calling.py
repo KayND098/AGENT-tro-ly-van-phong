@@ -19,7 +19,9 @@ class TestGeminiFunctionCalling(unittest.TestCase):
         init_db(self.db_path)
         self.confirm_service = ConfirmService(db_path=self.db_path)
         self.orig_provider = os.environ.get("LLM_PROVIDER")
+        self.orig_email_provider = os.environ.get("EMAIL_PROVIDER")
         os.environ["LLM_PROVIDER"] = "gemini"
+        os.environ["EMAIL_PROVIDER"] = "mock"
 
     def tearDown(self):
         self.temp_dir.cleanup()
@@ -27,6 +29,10 @@ class TestGeminiFunctionCalling(unittest.TestCase):
             os.environ["LLM_PROVIDER"] = self.orig_provider
         else:
             os.environ.pop("LLM_PROVIDER", None)
+        if self.orig_email_provider is not None:
+            os.environ["EMAIL_PROVIDER"] = self.orig_email_provider
+        else:
+            os.environ.pop("EMAIL_PROVIDER", None)
 
     def test_1_gemini_proposes_send_email_creates_pending_action_without_sending(self):
         """

@@ -1,6 +1,6 @@
 # PROGRESS.md - Tiến Độ Dự Án Trợ Lý Văn Phòng AI
 
-## Trạng Thái Hiện Tại: Đã hoàn thành Google Phiên 1 — Gmail OAuth & search_email (44/44 tests pass)
+## Trạng Thái Hiện Tại: Đã khắc phục lỗi đăng nhập Google PKCE & Hoàn thành Đa người dùng Phiên 2 (71/71 tests pass, Frontend build pass)
 
 - [x] Tạo `AGENTS.md` (luật hệ thống, phân quyền rủi ro tool)
 - [x] Tạo `docs/SKELETON_SPEC.md`
@@ -108,13 +108,92 @@
     - `search_email_handler` trả đúng `{query, count, emails}`.
   - [x] Toàn bộ **44/44 tests pass** (100%): 31 test cũ + 13 test mới Gmail.
 
+- [x] **Phiên 1 của "Đa người dùng": Đăng nhập Google (chỉ danh tính) & Phiên làm việc**:
+  - [x] Bảng SQLite mới (`backend/app/auth/db_auth.py`):
+    - `users` (id, google_sub UNIQUE, email, name, picture, created_at, last_login).
+    - `sessions` (id_hash PRIMARY KEY, user_id, created_at, expires_at).
+    - Khởi tạo idempotent (`init_auth_tables`).
+  - [x] Cơ chế Token & Phiên an toàn:
+    - Cookie `session_id` mang giá trị ngẫu nhiên 32 bytes (hex).
+    - Database CHỈ lưu SHA-256 hash của cookie, tuyệt đối không lưu token gốc.
+    - Cookie cấu hình: `HttpOnly=True`, `SameSite=Lax`, `Secure` tự động kích hoạt khi URL bắt đầu bằng `https`, thời hạn theo `SESSION_DAYS` (mặc định 30 ngày), tự động gia hạn khi có yêu cầu hợp lệ.
+  - [x] Luồng xác thực Google OAuth 2.0 (`backend/app/auth/`):
+    - Scope tối thiểu: `openid`, `email`, `profile` (tuyệt đối KHÔNG xin quyền Gmail ở bước này).
+    - Bảo vệ CSRF cho luồng OAuth: `state` ngẫu nhiên, PKCE (`code_verifier` & `code_challenge` S256), `nonce` lưu bộ nhớ với TTL 10 phút.
+    - Xác minh `id_token` bằng thư viện chính thức `google-auth` (`verify_oauth2_token`), kiểm tra chữ ký, audience, hạn và nonce.
+    - Kiểm soát truy cập: hỗ trợ lọc qua `ALLOWED_EMAILS` (chỉ email trong danh sách mới được phép vào).
+  - [x] Endpoints xác thực (`backend/app/auth/router.py`):
+    - `GET /auth/google/login`: chuyển hướng sang Google OAuth consent.
+    - `GET /auth/google/callback`: xác thực state/PKCE/nonce, đổi token, xác minh `id_token`, kiểm tra email, tạo/cập nhật user, tạo phiên, đặt cookie, chuyển hướng về `APP_BASE_URL`.
+    - `GET /auth/me`: trả thông tin `{id, email, name, picture}` hoặc 401.
+    - `POST /auth/logout`: xóa phiên phía server và xóa cookie trình duyệt.
+  - [x] Bảo vệ các Route nghiệp vụ:
+    - Dependency `require_user`: các route `/chat`, `/actions/*`, `/audit` yêu cầu đăng nhập, trả 401 JSON nếu thiếu hoặc hết hạn.
+    - Route `/health` công khai.
+    - Route POST kiểm tra bảo vệ chống CSRF qua header `X-Requested-With` và `Origin`.
+    - Route server-side HTML cũ `"/"` tiếp tục được duy trì, React SPA trên frontend là giao diện tương tác chính.
+  - [x] Giao diện Frontend (React + Vite + MD3):
+    - Màn hình đăng nhập `LoginPage.tsx` (hiện khi chưa đăng nhập / 401): Logo, tên app, nút "Đăng nhập bằng Google" (chuyển hướng `/auth/google/login`), thông báo lỗi nếu có, dòng chữ: *"Chỉ dùng tài khoản được cấp quyền thử nghiệm"*.
+    - TopBar: hiển thị Avatar và Email của người dùng đã đăng nhập, menu popup hỗ trợ "Đăng xuất" (`POST /auth/logout`).
+    - Tất cả các lệnh gọi API (`/chat`, `/actions/*`, `/audit`, `/auth/logout`) gửi kèm cookie (`credentials: 'same-origin'`) và header `X-Requested-With`. Khi nhận 401 tự động chuyển về màn hình Login kèm thông báo snackbar.
+    - `vite.config.ts`: proxy thêm `/auth` tới `http://127.0.0.1:8000`, không thêm host `0.0.0.0`.
+  - [x] Bộ kiểm thử unit tests `backend/tests/test_auth.py` (14 test cases mock 100%, không gọi mạng thật).
+  - [x] Toàn bộ **58/58 tests pass** (100%) và `npm run build` thành công.
+
+- [x] **Phiên 2 của "Đa người dùng": Tách Biệt Dữ Liệu Theo Người Dùng**:
+  - [x] **DB Migration & Idempotency** (`backend/app/db.py`):
+    - Thêm cột `user_id INTEGER` vào `pending_actions` và `audit_log` bằng migration an toàn (`ALTER TABLE ... ADD COLUMN` nếu thiếu).
+    - Tạo index `idx_pending_user_id` và `idx_audit_user_id`.
+    - Dữ liệu cũ không có `user_id` (giá trị `NULL`) coi như "không thuộc ai", người dùng thông thường không nhìn thấy.
+    - `record_audit_log` hỗ trợ tham số `user_id`.
+  - [x] **Confirm Service Kiểm Soát Quyền Sở Hữu** (`backend/app/confirm/service.py`):
+    - Mọi thao tác `create_pending_action`, `get_action`, `list_pending_actions`, `approve_action`, `reject_action` nhận và kiểm tra `user_id`.
+    - Người này truy cập/duyệt/hủy thẻ của người khác trả về lỗi `ActionNotFoundError` (FastAPI map thành 404, không dùng 403 để không lộ việc thẻ tồn tại).
+    - Tự động ghi nhận sự kiện `UNAUTHORIZED_ACCESS` vào `audit_log` mà TUYỆT ĐỐI không ghi nội dung/tham số gốc của thẻ.
+    - Giữ nguyên 100% cơ chế chống duyệt đúp (idempotent), TTL 10 phút, và hỗ trợ `edited_args`.
+  - [x] **Bảo Vệ Routes Nghiệp Vụ** (`backend/app/main.py`):
+    - Các route `GET /actions/pending`, `GET /actions/{id}`, `POST /actions/{id}/approve`, `POST /actions/{id}/reject`, `GET /audit` trích xuất `user_id` từ `require_user` (không nhận từ client).
+    - Endpoint mới `POST /chat/clear` (hoặc `POST /chat/new`) hỗ trợ làm mới hội thoại của riêng người dùng.
+  - [x] **Quản Lý Lịch Sử Hội Thoại Agent** (`backend/app/agent/history.py` & `loop.py`):
+    - Tách biệt lịch sử hội thoại trong bộ nhớ theo `user_id`.
+    - Giới hạn dung lượng: tối đa N tin mỗi người (mặc định 50 tin gần nhất theo cửa sổ trượt).
+    - Tự động dọn dẹp các phiên không hoạt động quá 24 giờ (`prune_inactive`).
+    - Nút "+ Cuộc trò chuyện mới" gọi `POST /chat/clear` chỉ xóa lịch sử của chính người dùng đó.
+  - [x] **Truyền Thông Tin Người Dùng & Chốt Chặn An Toàn Gmail**:
+    - `agent_loop.run` nhận thông tin `user` và truyền tới tool handler qua `RegisteredTool.execute(user=user, ...)`.
+    - Chốt chặn an toàn: Bổ sung biến môi trường `GMAIL_OWNER_EMAIL`. Khi `EMAIL_PROVIDER=google`, nếu người dùng không phải `GMAIL_OWNER_EMAIL`, `search_email` chặn đọc file `token.json` chung và trả thông báo thân thiện: *"Tài khoản này chưa kết nối Gmail"*.
+    - Khi `GMAIL_OWNER_EMAIL` để trống, hệ thống ghi log cảnh báo an toàn khi khởi động nếu phát hiện có nhiều hơn 1 user.
+    - Cập nhật `.env.example`.
+  - [x] **Tài Liệu RAG**: `backend/data/docs` tiếp tục là kho tài liệu quy định nội bộ dùng chung toàn công ty.
+  - [x] **Frontend**: Giao diện giữ nguyên, danh sách chờ duyệt, badge đếm số lượng, và nhật ký hoạt động đồng bộ chính xác theo dữ liệu đã lọc của người dùng hiện tại.
+  - [x] **Bộ Kiểm Thử Đa Người Dùng Mới** (`backend/tests/test_multiuser_isolation.py` - 9/9 tests pass).
+  - [x] Toàn bộ **67/67 tests pass** (100%) và `npm run build` thành công.
+
+- [x] **Vá Lỗi Đăng Nhập Google PKCE (`Missing code verifier`)**:
+  - [x] **Nguyên nhân**: Khi tạo URL đăng nhập, PKCE `code_verifier` được sinh nhưng ở `google_callback`, đối tượng `Flow` được tạo mới mà không có `code_verifier`, khiến `flow.fetch_token(code=code)` bị lỗi `InvalidGrantError: Missing code verifier`.
+  - [x] **Khắc phục tại `backend/app/auth/state_store.py`**:
+    - Bổ sung `consume_state_with_status(state)`: trả về chính xác cặp `(state_data, status)`. Phân định rõ `state_invalid` (không tìm thấy hoặc đã dùng trước đó) và `state_expired` (quá 10 phút).
+    - Đảm bảo cơ chế dùng một lần duy nhất (`pop`).
+  - [x] **Khắc phục tại `backend/app/auth/router.py`**:
+    - `google_login`: Truyền `code_verifier=code_verifier` và `autogenerate_code_verifier=False` vào `Flow.from_client_secrets_file` để khóa giá trị PKCE duy nhất, không để thư viện tự sinh verifier khác.
+    - `google_callback`: Khởi tạo `Flow` với `redirect_uri` chuẩn, truyền `code_verifier` lấy từ state store và gọi `flow.fetch_token(code=code, code_verifier=code_verifier)`. Xóa state ngay lập tức.
+    - Phân tách rõ ràng các nhánh mã lỗi ngắn: `state_invalid`, `state_expired`, `code_missing`, `no_client_config`, `token_exchange_failed`, `id_token_invalid`, `nonce_mismatch`, `email_not_allowed`, `scope_changed`, `auth_failed`.
+    - Ghi log bằng `logging.exception` hoặc `logger.warning` chỉ chứa TÊN loại lỗi và mã lỗi, tuyệt đối không log token, authorization code hay cookie.
+  - [x] **Bộ Kiểm Thử Mới** (`TestPKCEAndErrorHandling` trong `backend/tests/test_auth.py`):
+    - Kiểm tra `flow.fetch_token` được gọi với đúng `code_verifier` sinh lúc login.
+    - Kiểm tra dùng state lần 2 bị từ chối (`state_invalid`).
+    - Kiểm tra state hết hạn bị từ chối (`state_expired`).
+    - Kiểm tra log lỗi tuyệt đối không rò rỉ authorization code hay token.
+  - [x] Toàn bộ **71/71 tests pass** (100%) và `npm run build` thành công.
+
 ---
 
 ## Lộ Trình Tương Lai (Roadmap / Việc Còn Nợ)
+- [x] **Đa người dùng - Phiên 2**: Tách biệt dữ liệu theo người dùng (`pending_actions`, `audit_log`, lịch sử chat phân theo `user_id`).
+- [ ] **Đa người dùng - Phiên 3**: Kết nối Gmail và Google Workspace riêng biệt cho từng người dùng.
 - [ ] **Phiên 2B của LLM thật**: Cơ chế retry khi gặp lỗi 503/429 + cấu hình mô hình dự phòng `GEMINI_FALLBACK_MODEL`.
 - [ ] Thêm câu mẫu cho `FakeLLM` để nhận diện và sinh lệnh `create_event`.
 - [ ] Backend: Sinh lại dry-run `preview` (cập nhật `sample_rows_preview`) khi người dùng duyệt kèm `edited_args` cho `delete_rows`.
 - [ ] Xây dựng form "Sửa" cho `create_event` và `update_cells`.
-- [ ] **Google Phiên 2**: Mở rộng Gmail (send_email, create_draft) + Google Calendar + Google Sheets với OAuth.
 - [ ] Mở rộng RAG nâng cao (Vector embeddings, Hybrid search, Chunking ngữ nghĩa).
-- [ ] *(Tùy chọn - Ngoài phạm vi bài tập)* Mở rộng cơ chế phân quyền RBAC và xác thực người dùng.
+

@@ -55,15 +55,29 @@ def create_state(nonce: str) -> tuple[str, str, str]:
     return state, code_verifier, code_challenge
 
 
-def consume_state(state: str) -> Optional[Dict[str, Any]]:
+def consume_state_with_status(state: str) -> tuple[Optional[Dict[str, Any]], str]:
     """
-    Lấy và xóa entry theo state. Trả None nếu không tồn tại hoặc hết hạn.
-    Mỗi state chỉ dùng được đúng một lần.
+    Lấy và xóa entry theo state (dùng một lần duy nhất).
+    Trả về (data, status):
+    - status = "valid": data = {"nonce": ..., "code_verifier": ...}
+    - status = "state_invalid": state không tồn tại hoặc đã bị dùng
+    - status = "state_expired": state đã hết hạn (TTL 10 phút)
     """
+    if not state:
+        return None, "state_invalid"
     with _lock:
         entry = _store.pop(state, None)
     if entry is None:
-        return None
+        return None, "state_invalid"
     if _now() > entry["expires_at"]:
-        return None
-    return {"nonce": entry["nonce"], "code_verifier": entry["code_verifier"]}
+        return None, "state_expired"
+    return {"nonce": entry["nonce"], "code_verifier": entry["code_verifier"]}, "valid"
+
+
+def consume_state(state: str) -> Optional[Dict[str, Any]]:
+    """
+    Lấy và xóa entry theo state. Trả None nếu không tồn tại hoặc hết hạn.
+    Mỗi state chỉ dùng được đúng một lần (giữ tương thích ngược).
+    """
+    data, _ = consume_state_with_status(state)
+    return data

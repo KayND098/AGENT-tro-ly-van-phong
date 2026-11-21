@@ -24,7 +24,7 @@ from .db_auth import (
     init_auth_tables,
     upsert_user,
 )
-from .state_store import consume_state, create_state
+from .state_store import consume_state, consume_state_with_status, create_state
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +136,8 @@ def google_login():
             str(client_file),
             scopes=IDENTITY_SCOPES,
             redirect_uri=redirect_uri,
+            code_verifier=code_verifier,
+            autogenerate_code_verifier=False,
         )
 
         auth_url, _ = flow.authorization_url(
@@ -143,13 +145,11 @@ def google_login():
             include_granted_scopes="false",
             state=state,
             nonce=nonce,
-            code_challenge=code_challenge,
-            code_challenge_method="S256",
             prompt="select_account",
         )
         return RedirectResponse(url=auth_url, status_code=302)
-    except Exception:
-        logger.exception("Lỗi khi tạo URL đăng nhập Google")
+    except Exception as exc:
+        logger.exception("Lỗi khi tạo URL đăng nhập Google: %s", type(exc).__name__)
         base = get_app_base_url()
         return RedirectResponse(url=f"{base}/?error=login_failed", status_code=302)
 
@@ -158,29 +158,35 @@ def google_login():
 def google_callback(request: Request, state: str = "", code: str = ""):
     """
     Callback từ Google sau khi người dùng đồng ý.
-    1. Kiểm tra state → xác minh PKCE+nonce.
-    2. Đổi code lấy id_token; xác minh chữ ký, audience, hạn, nonce.
-    3. Kiểm tra ALLOWED_EMAILS.
-    4. Upsert user, tạo phiên, đặt cookie, chuyển hướng.
-    Mọi lỗi → redirect về APP_BASE_URL kèm mã lỗi ngắn, không lộ chi tiết.
+    1. Kiểm tra state (dùng 1 lần duy nhất) → lấy code_verifier + nonce.
+    2. Đổi code lấy id_token (fetch_token kèm code_verifier).
+    3. Xác minh id_token qua google-auth.
+    4. Kiểm tra ALLOWED_EMAILS.
+    5. Upsert user, tạo phiên, đặt cookie, chuyển hướng.
     """
     base = get_app_base_url()
     secure = base.startswith("https")
     session_days = get_session_days()
 
     # 1. Kiểm tra state
-    state_data = consume_state(state)
-    if not state_data:
-        logger.warning("OAuth callback: state không hợp lệ hoặc đã hết hạn.")
-        return RedirectResponse(url=f"{base}/?error=invalid_state", status_code=302)
+    state_data, state_status = consume_state_with_status(state)
+    if state_status == "state_invalid":
+        logger.warning("OAuth callback thất bại [state_invalid]: state không hợp lệ hoặc đã dùng.")
+        return RedirectResponse(url=f"{base}/?error=state_invalid", status_code=302)
+    elif state_status == "state_expired":
+        logger.warning("OAuth callback thất bại [state_expired]: state đã hết hạn.")
+        return RedirectResponse(url=f"{base}/?error=state_expired", status_code=302)
 
     if not code:
-        logger.warning("OAuth callback: thiếu authorization code.")
-        return RedirectResponse(url=f"{base}/?error=no_code", status_code=302)
+        logger.warning("OAuth callback thất bại [code_missing]: thiếu authorization code.")
+        return RedirectResponse(url=f"{base}/?error=code_missing", status_code=302)
 
     client_file = get_web_client_file()
     if not client_file.exists():
+        logger.warning("OAuth callback thất bại [no_client_config]: không tìm thấy client file.")
         return RedirectResponse(url=f"{base}/?error=no_client_config", status_code=302)
+
+    code_verifier = state_data["code_verifier"]
 
     try:
         from google_auth_oauthlib.flow import Flow
@@ -193,10 +199,11 @@ def google_callback(request: Request, state: str = "", code: str = ""):
             str(client_file),
             scopes=IDENTITY_SCOPES,
             redirect_uri=redirect_uri,
+            code_verifier=code_verifier,
+            autogenerate_code_verifier=False,
             state=state,
         )
 
-        # Đọc client_id từ file để xác minh audience
         client_config = _json.loads(client_file.read_text(encoding="utf-8"))
         client_id = (
             client_config.get("web", {}).get("client_id")
@@ -204,22 +211,38 @@ def google_callback(request: Request, state: str = "", code: str = ""):
             or ""
         )
 
-        # Đổi code lấy token
-        flow.fetch_token(code=code)
+        # 2. Đổi code lấy token với code_verifier
+        try:
+            flow.fetch_token(code=code, code_verifier=code_verifier)
+        except Exception as exc:
+            logger.exception("OAuth callback thất bại [token_exchange_failed]: %s", type(exc).__name__)
+            return RedirectResponse(url=f"{base}/?error=token_exchange_failed", status_code=302)
+
         credentials = flow.credentials
         id_token_str = credentials.id_token
 
-        # 2. Xác minh id_token qua thư viện google-auth (kiểm tra chữ ký + audience + hạn)
-        http_request = google_requests.Request()
-        id_info = google.oauth2.id_token.verify_oauth2_token(
-            id_token_str,
-            http_request,
-            audience=client_id,
-        )
+        # Kiểm tra scope nếu bị thay đổi (chỉ khi scopes là danh sách cụ thể)
+        scopes_granted = getattr(credentials, "scopes", None)
+        if isinstance(scopes_granted, (list, tuple, set)) and scopes_granted:
+            if not set(IDENTITY_SCOPES).issubset(set(scopes_granted)):
+                logger.warning("OAuth callback thất bại [scope_changed]: scopes cấp không đủ.")
+                return RedirectResponse(url=f"{base}/?error=scope_changed", status_code=302)
+
+        # 3. Xác minh id_token
+        try:
+            http_request = google_requests.Request()
+            id_info = google.oauth2.id_token.verify_oauth2_token(
+                id_token_str,
+                http_request,
+                audience=client_id,
+            )
+        except Exception as exc:
+            logger.exception("OAuth callback thất bại [id_token_invalid]: %s", type(exc).__name__)
+            return RedirectResponse(url=f"{base}/?error=id_token_invalid", status_code=302)
 
         # Xác minh nonce
         if id_info.get("nonce") != state_data["nonce"]:
-            logger.warning("OAuth callback: nonce không khớp.")
+            logger.warning("OAuth callback thất bại [nonce_mismatch]: nonce không khớp.")
             return RedirectResponse(url=f"{base}/?error=nonce_mismatch", status_code=302)
 
         email_addr = id_info.get("email", "").lower().strip()
@@ -227,16 +250,17 @@ def google_callback(request: Request, state: str = "", code: str = ""):
         name = id_info.get("name", email_addr)
         picture = id_info.get("picture")
 
-        # 3. Kiểm tra ALLOWED_EMAILS
+        # 4. Kiểm tra ALLOWED_EMAILS
         allowed = get_allowed_emails()
         if allowed and email_addr not in allowed:
-            logger.warning("OAuth callback: email '%s' không trong danh sách cho phép.", email_addr)
-            return RedirectResponse(url=f"{base}/?error=not_allowed", status_code=302)
+            logger.warning("OAuth callback thất bại [email_not_allowed]: email không trong danh sách cho phép.")
+            return RedirectResponse(url=f"{base}/?error=email_not_allowed", status_code=302)
 
         if not google_sub or not email_addr:
-            return RedirectResponse(url=f"{base}/?error=invalid_token", status_code=302)
+            logger.warning("OAuth callback thất bại [id_token_invalid]: thiếu sub hoặc email.")
+            return RedirectResponse(url=f"{base}/?error=id_token_invalid", status_code=302)
 
-        # 4. Upsert user và tạo phiên
+        # 5. Upsert user và tạo phiên
         init_auth_tables()
         user = upsert_user(google_sub=google_sub, email=email_addr, name=name, picture=picture)
         token = create_session(user_id=user["id"], session_days=session_days)
@@ -245,9 +269,8 @@ def google_callback(request: Request, state: str = "", code: str = ""):
         _set_session_cookie(redirect_response, token, session_days, secure)
         return redirect_response
 
-    except Exception:
-        # Không log chi tiết lỗi chứa token; chỉ ghi type lỗi
-        logger.exception("Lỗi xử lý OAuth callback (chi tiết ẩn để bảo mật)")
+    except Exception as exc:
+        logger.exception("OAuth callback thất bại [auth_failed]: %s", type(exc).__name__)
         return RedirectResponse(url=f"{base}/?error=auth_failed", status_code=302)
 
 

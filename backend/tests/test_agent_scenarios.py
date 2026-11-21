@@ -22,7 +22,9 @@ class TestAgentScenarios(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db_path = os.path.join(self.temp_dir.name, "scenario_test.db")
         self.orig_provider = os.environ.get("LLM_PROVIDER")
+        self.orig_email_provider = os.environ.get("EMAIL_PROVIDER")
         os.environ["LLM_PROVIDER"] = "fake"
+        os.environ["EMAIL_PROVIDER"] = "mock"
         os.environ["DATABASE_PATH"] = self.db_path
         confirm_service.db_path = self.db_path
         init_db(self.db_path)
@@ -33,6 +35,10 @@ class TestAgentScenarios(unittest.TestCase):
             os.environ["LLM_PROVIDER"] = self.orig_provider
         else:
             os.environ.pop("LLM_PROVIDER", None)
+        if self.orig_email_provider is not None:
+            os.environ["EMAIL_PROVIDER"] = self.orig_email_provider
+        else:
+            os.environ.pop("EMAIL_PROVIDER", None)
 
     def test_scenario_1_search_email_runs_immediately(self):
         """
