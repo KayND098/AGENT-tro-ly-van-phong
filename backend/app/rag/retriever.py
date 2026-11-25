@@ -12,7 +12,9 @@ from contextlib import contextmanager
 
 from ..db import get_db_path, get_db
 
-DEFAULT_DOCS_DIR = (Path(__file__).resolve().parent.parent.parent / "data" / "docs").resolve()
+DEFAULT_DOCS_DIR = Path(
+    os.environ.get("DOCS_DIR") or (Path(__file__).resolve().parent.parent.parent / "data" / "docs")
+).resolve()
 
 STOP_WORDS = {
     "tim", "tai", "lieu", "ve", "cua", "cho", "xem", "huong", "dan", "nhe", "a", "oi",
@@ -51,7 +53,7 @@ class FtsRetriever(Retriever):
         auto_index: bool = True,
     ):
         self.db_path = db_path or get_db_path()
-        self.docs_dir = Path(docs_dir or DEFAULT_DOCS_DIR).resolve()
+        self.docs_dir = Path(docs_dir or os.environ.get("DOCS_DIR") or DEFAULT_DOCS_DIR).resolve()
         self.has_fts5 = self._check_fts5_support()
         if not self.has_fts5:
             logging.warning("SQLite không hỗ trợ module FTS5 trên máy này. Tự động chuyển sang fallback keyword scoring.")

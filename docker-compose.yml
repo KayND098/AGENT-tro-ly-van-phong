@@ -1,29 +1,53 @@
-version: '3.8'
-
 services:
   backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
     container_name: office_assistant_backend
-    ports:
-      - "8000:8000"
-    environment:
-      - DATABASE_PATH=/app/app/app.db
-      - ENVIRONMENT=development
-    volumes:
-      - ./backend/app:/app/app
     restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      - AUTH_MODE=${AUTH_MODE:-demo}
+      - DATABASE_PATH=/data/app.db
+      - DOCS_DIR=/app/data/docs
+      - APP_BASE_URL=${APP_BASE_URL:-http://localhost:5173}
+      - EMAIL_PROVIDER=${EMAIL_PROVIDER:-mock}
+      - LLM_PROVIDER=${LLM_PROVIDER:-fake}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.8-flash}
+      - SESSION_DAYS=${SESSION_DAYS:-30}
+      - TOKEN_ENCRYPTION_KEY=${TOKEN_ENCRYPTION_KEY:-}
+      - GOOGLE_WEB_CLIENT_FILE=${GOOGLE_WEB_CLIENT_FILE:-/app/secrets/web_client_secret.json}
+    volumes:
+      - office_data:/data
+    networks:
+      - office_net
+    # Backend KHÔNG mở cổng ra máy chủ; chỉ giao tiếp nội bộ với frontend Nginx qua mạng office_net.
 
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
     container_name: office_assistant_frontend
+    restart: unless-stopped
     ports:
-      - "5173:5173"
-    environment:
-      - VITE_API_URL=http://localhost:8000
+      # CHỈ ánh xạ cổng vào 127.0.0.1 (localhost) để an toàn:
+      - "127.0.0.1:5173:80"
+      # [CẢNH BÁO BẢO MẬT KHI MỞ MẠNG LAN]:
+      # Để mở ứng dụng cho các thiết bị khác trong mạng LAN, đổi thành "0.0.0.0:5173:80".
+      # NGUY CƠ: Ở chế độ demo, mọi thiết bị trong cùng mạng Wi-Fi/LAN đều có thể truy cập
+      # và thực thi các thao tác trợ lý mà không cần xác thực mật khẩu.
     depends_on:
       - backend
-    restart: unless-stopped
+    networks:
+      - office_net
+
+volumes:
+  office_data:
+    driver: local
+
+networks:
+  office_net:
+    driver: bridge

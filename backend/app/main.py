@@ -24,7 +24,7 @@ from .agent.loop import agent_loop
 # Auth
 from .auth.db_auth import init_auth_tables
 from .auth.router import router as auth_router, require_user, _check_csrf
-from .auth.config import get_app_base_url
+from .auth.config import get_app_base_url, validate_demo_mode_or_raise
 
 from contextlib import asynccontextmanager
 
@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    validate_demo_mode_or_raise()
     init_db()
     init_auth_tables()
     # Cảnh báo an toàn Gmail nếu có nhiều hơn 1 user mà chưa cấu hình GMAIL_OWNER_EMAIL

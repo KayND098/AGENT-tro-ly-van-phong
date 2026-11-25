@@ -162,14 +162,52 @@ Tài liệu bàn giao nhanh trạng thái hiện tại của dự án để ti�
     - Giao diện giữ nguyên, danh sách "Cần xác nhận", badge đếm số lượng, và trang Nhật ký hoạt động đồng bộ chính xác theo dữ liệu đã lọc của người dùng hiện tại.
     - Nút "+ Cuộc trò chuyện mới" gọi `POST /chat/clear` và xóa state messages nội bộ.
   - **Kiểm Thử**:
-    - Bộ test đa người dùng mới `backend/tests/test_multiuser_isolation.py` gồm 9 test cases đáp ứng đầy đủ yêu cầu (mock 100%, không gọi mạng thật).
-    - Toàn bộ **67/67 tests pass** (100%) và `npm run build` thành công.
+    - Bộ test đa người dùng `backend/tests/test_multiuser_isolation.py` (9 tests) và `backend/tests/test_auth.py` (18 tests).
+    - Toàn bộ **71/71 tests pass** (100%) và `npm run build` thành công.
+
+- **Đa người dùng - Phiên 3: Kết nối Google Workspace (Gmail) riêng biệt cho từng người dùng**:
+  - **Database & Bảo mật Token SQLite** (`backend/app/auth/db_auth.py`):
+    - Bảng mới `user_google_tokens`: `user_id` (PRIMARY KEY, FOREIGN KEY `users(id)` ON DELETE CASCADE), `access_token`, `refresh_token`, `token_uri`, `client_id`, `client_secret`, `scopes`, `expiry`, `updated_at`.
+    - CRUD an toàn: `upsert_user_google_token`, `get_user_google_token`, `delete_user_google_token` (bảo toàn refresh_token cũ khi làm mới).
+    - Bảo mật nghiêm ngặt: Tuyệt đối không log token, che giấu dữ liệu nhạy cảm qua `sanitize_sensitive_data`.
+  - **Cấp Quyền Bổ Sung (Incremental Authorization)** (`backend/app/auth/router.py` & `state_store.py`):
+    - `state_store.py` lưu `purpose` (`"login"` hoặc `"connect_gmail"`) và `user_id`.
+    - `GET /auth/google/connect-gmail` (yêu cầu `require_user`): tạo OAuth URL PKCE xin quyền `https://www.googleapis.com/auth/gmail.readonly` kèm `prompt="consent"`, `include_granted_scopes="true"`.
+    - `GET /auth/google/callback`:
+      - Khi `purpose == "connect_gmail"`: đối chiếu email từ `id_token` với email người dùng đăng nhập hiện tại; nếu lệch trả về `?error=email_mismatch`, nếu khớp lưu token vào `user_google_tokens` và chuyển hướng `?gmail_connected=1`.
+    - `POST /auth/google/disconnect-gmail` (yêu cầu `require_user` + `_check_csrf`): xóa token của user khỏi SQLite.
+    - `GET /auth/me`: trả về thêm `gmail_connected: bool`.
+  - **Cập nhật `GmailProvider` & Tool `search_email`**:
+    - `GmailProvider`: khởi tạo từ dict token và `user_id` trong DB. Tự động `creds.refresh` khi hết hạn và cập nhật lại `access_token` + `expiry` mới vào SQLite.
+    - `search_email_handler`: lấy token theo `user["id"]`. Chưa kết nối Gmail trả thông báo thân thiện: *"Tài khoản của bạn chưa kết nối Gmail. Vui lòng mở menu tài khoản ở góc trên bên phải và chọn 'Kết nối Gmail'."* (Loại bỏ ràng buộc `GMAIL_OWNER_EMAIL`).
+  - **Frontend (React + Vite + MD3)**:
+    - Type `User` cập nhật `gmail_connected?: boolean`.
+    - Tách component `UserMenu.tsx` (< 200 dòng): hiển thị trạng thái đã kết nối Gmail, nút "Kết nối Gmail" / "Ngắt kết nối Gmail".
+    - `TopBar.tsx` (< 200 dòng) tích hợp `UserMenu`.
+    - `App.tsx`: bắt query param `?gmail_connected=1` và `?error=...`, hiển thị Snackbar thông báo rõ ràng và dọn sạch URL.
+  - **Kiểm Thử Toàn Diện**:
+    - Bộ test `backend/tests/test_multiuser_gmail.py` (7 tests mới, mock 100%, không gọi mạng).
+    - Toàn bộ **78/78 tests pass** (100%) và `cmd /c "cd frontend && npm run build"` thành công.
+
+- **Đóng Gói Bản v1 bằng Docker Compose & Chế Độ Demo**:
+  - **backend/Dockerfile**: Base `python:3.12-slim`, non-root user `appuser` (UID 1000), `HEALTHCHECK` gọi `/health` định kỳ, volume `/data` chứa SQLite (`DATABASE_PATH=/data/app.db`), đóng gói tài liệu mẫu `data/docs` vào image (`DOCS_DIR=/app/data/docs`), chạy `uvicorn` không dùng cờ `--reload`.
+  - **frontend/Dockerfile & nginx.conf**: Dockerfile nhiều giai đoạn (Stage 1: build bằng `node:20-alpine`; Stage 2: phục vụ file tĩnh bằng `nginx:alpine`). `nginx.conf` reverse proxy các route `/chat`, `/actions`, `/audit`, `/auth`, `/health` sang `http://backend:8000`, giữ nguyên cookie và header `X-Requested-With`, `Origin`. Không dùng dev server trong production image.
+  - **docker-compose.yml**: Hai dịch vụ `backend` và `frontend`, volume `office_data:/data`, mạng nội bộ `office_net`. Ánh xạ cổng frontend chỉ vào `127.0.0.1:5173:80` an toàn, có chú thích cảnh báo rủi ro khi mở mạng LAN (`0.0.0.0:5173:80`). Nạp `.env` tùy chọn với cú pháp `env_file: - path: .env, required: false`. Backend không mở cổng ra máy chủ, chỉ frontend Nginx mở.
+  - **.dockerignore** (gốc, backend, frontend): Chặn triệt để `.env`, `.env.*` (ngoại trừ `.env.example`), `secrets/`, `*.db`, `*.log`, `node_modules`, `dist`, `__pycache__`, `token*.json`, `client_secret*.json`.
+  - **Chế độ Demo (`AUTH_MODE`)**:
+    - Mã nguồn mặc định an toàn là `google`, không bao giờ tự bật demo khi biến thiếu hoặc sai giá trị. File `.env.example` và docker-compose fallback mặc định demo để người ngoài chạy thử 1 lệnh không cần Google Cloud hay Gemini API key.
+    - Demo tự động tạo người dùng "Demo", tự cấp session và cookie an toàn, bảo toàn 100% cơ chế phiên, CSRF và phân quyền theo `user_id`.
+    - Ép `EMAIL_PROVIDER=mock`, vô hiệu kết nối Gmail và không đọc `token.json`. `LLM_PROVIDER` mặc định `fake`, chỉ dùng Gemini khi người dùng tự cung cấp `GEMINI_API_KEY`.
+    - Khởi động an toàn: Từ chối khởi động nếu `APP_BASE_URL` là https hoặc tên miền ngoài localhost (`validate_demo_mode_or_raise`). Ghi log cảnh báo an toàn khi demo chạy.
+  - **Frontend MD3**: Hiển thị banner *"Chế độ demo: dữ liệu mẫu, không kết nối Gmail"* ngay dưới TopBar khi `user.demo_mode=true`, hỗ trợ responsive và Dark Mode.
+  - **README.md & .env.example**: Viết lại README ngắn gọn tiếng Việt đầy đủ 5 mục (chạy thử nhanh 1 lệnh, các thử nghiệm gợi ý, dùng Gemini thật, dùng Google OAuth, và xử lý sự cố / lưu ý an toàn). Cập nhật `.env.example` đầy đủ các biến mới.
+  - **Kiểm thử**: Bộ kiểm thử unit tests `backend/tests/test_docker_v1_demo.py` (6 tests mới, mock 100%). Toàn bộ **87/87 tests pass** (100%), `npm run build` thành công, `docker-compose config` hợp lệ.
 
 ---
 
 ## 2. CHƯA LÀM (VIỆC CÒN NỢ)
 
-- [ ] **Đa người dùng - Phiên 3**: Kết nối Gmail và Google Workspace riêng biệt cho từng người dùng.
+- [x] **Đa người dùng - Phiên 3**: Kết nối Gmail và Google Workspace riêng biệt cho từng người dùng.
 - [ ] **Phiên 2B của LLM thật**: Cơ chế retry khi gặp lỗi 503/429 + cấu hình mô hình dự phòng `GEMINI_FALLBACK_MODEL`.
 - [ ] Thêm câu mẫu cho `FakeLLM` để nhận diện và sinh lệnh `create_event`.
 - [ ] Backend: Sinh lại dry-run `preview` (cập nhật `sample_rows_preview`) khi người dùng duyệt kèm `edited_args` cho `delete_rows`.
@@ -181,19 +219,31 @@ Tài liệu bàn giao nhanh trạng thái hiện tại của dự án để ti�
 ## 3. LỆNH CHẠY & KIỂM THỬ
 
 ```bash
-# 1. Chạy Backend
+# 1. Chạy nhanh toàn bộ hệ thống bằng Docker Compose (Bản v1)
+docker compose up --build
+
+# Dừng hệ thống Docker
+docker compose down
+
+# Xóa toàn bộ dữ liệu volume /data
+docker compose down -v
+
+# 2. Chạy Backend thủ công (Local Development)
 cd backend
 python -m uvicorn app.main:app --reload --port 8000
 
-# 2. Chạy Frontend
+# 3. Chạy Frontend thủ công (Local Development)
 cd frontend
 npm.cmd run dev
 
-# 3. Kiểm thử Backend (67 tests)
+# 4. Kiểm thử Backend (87 tests)
 python -m pytest backend/tests -v
 
-# 4. Kiểm thử Frontend Build
+# 5. Kiểm thử Frontend Build
 cmd /c "npm --prefix frontend run build"
+
+# 6. Kiểm tra cấu hình Docker Compose
+docker-compose config
 
 # 5. Kiểm tra danh sách mô hình Gemini khả dụng
 python backend/check_models.py

@@ -52,18 +52,28 @@ export function App() {
   // Kiểm tra phiên đăng nhập
   const checkAuth = useCallback(async () => {
     const params = new URLSearchParams(window.location.search);
-    const err = params.get('error');
+    if (params.get('gmail_connected') === '1') {
+      showSnackbar('Đã kết nối tài khoản Gmail thành công!', 'success');
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+    const err = params.get('error') || params.get('auth_error');
     if (err) {
       const errorMap: Record<string, string> = {
+        email_mismatch: 'Email Google kết nối không khớp với tài khoản đang đăng nhập.',
+        connect_failed: 'Kết nối Gmail thất bại. Vui lòng thử lại.',
         not_allowed: 'Tài khoản của bạn không nằm trong danh sách được cấp quyền thử nghiệm.',
         login_failed: 'Đăng nhập Google thất bại. Vui lòng thử lại.',
         invalid_state: 'Yêu cầu xác thực không hợp lệ hoặc đã hết hạn.',
+        state_invalid: 'Yêu cầu xác thực không hợp lệ hoặc đã hết hạn.',
+        state_expired: 'Yêu cầu xác thực đã hết hạn.',
         nonce_mismatch: 'Xác thực không thành công (nonce không khớp).',
         no_code: 'Không nhận được mã xác thực từ Google.',
+        code_missing: 'Không nhận được mã xác thực từ Google.',
         no_client_config: 'Hệ thống chưa cấu hình Google OAuth Client Secret.',
         auth_failed: 'Xác thực Google thất bại. Vui lòng thử lại.',
       };
-      setAuthError(errorMap[err] || `Đăng nhập thất bại (${err}).`);
+      setAuthError(errorMap[err] || `Xác thực thất bại (${err}).`);
+      showSnackbar(errorMap[err] || `Có lỗi xảy ra (${err}).`, 'error');
       window.history.replaceState({}, '', window.location.pathname);
     }
 
@@ -118,6 +128,29 @@ export function App() {
     }
     setUser(null);
     showSnackbar('Đã đăng xuất thành công.', 'info');
+  };
+
+  const handleConnectGmail = () => {
+    window.location.href = `${API_BASE_URL}/auth/google/connect-gmail`;
+  };
+
+  const handleDisconnectGmail = async () => {
+    try {
+      const res = await apiCall('/auth/google/disconnect-gmail', {
+        method: 'POST',
+      });
+      if (res.ok) {
+        setUser((prev) => (prev ? { ...prev, gmail_connected: false } : null));
+        showSnackbar('Đã ngắt kết nối Gmail thành công.', 'info');
+      } else {
+        const data = await res.json().catch(() => ({}));
+        showSnackbar(data.message || 'Ngắt kết nối Gmail thất bại.', 'error');
+      }
+    } catch (e: any) {
+      if (e?.message !== '401_UNAUTHORIZED') {
+        showSnackbar('Không thể kết nối đến máy chủ.', 'error');
+      }
+    }
   };
 
   const fetchPendingActions = useCallback(async () => {
@@ -260,7 +293,32 @@ export function App() {
         onToggleTheme={() => setTheme((prev) => (prev === 'light' ? 'dark' : 'light'))}
         user={user}
         onLogout={handleLogout}
+        onConnectGmail={handleConnectGmail}
+        onDisconnectGmail={handleDisconnectGmail}
       />
+      {user?.demo_mode && (
+        <div
+          role="status"
+          style={{
+            backgroundColor: theme === 'dark' ? '#3e2e04' : '#fef7e0',
+            color: theme === 'dark' ? '#ffdf99' : '#734c00',
+            padding: '6px 16px',
+            fontSize: '13px',
+            fontWeight: 500,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: '8px',
+            borderBottom: theme === 'dark' ? '1px solid #5d4508' : '1px solid #f9e2af',
+            userSelect: 'none',
+          }}
+        >
+          <span className="material-symbols-outlined" style={{ fontSize: '18px', verticalAlign: 'middle' }}>
+            info
+          </span>
+          <span>Chế độ demo: dữ liệu mẫu, không kết nối Gmail</span>
+        </div>
+      )}
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden', position: 'relative' }}>
         <Sidebar
           isOpen={sidebarOpen}

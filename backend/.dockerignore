@@ -1,0 +1,29 @@
+# Secrets & Environment variables
+.env
+.env.*
+!.env.example
+secrets/
+**/secrets/
+token*.json
+**/token*.json
+client_secret*.json
+**/client_secret*.json
+
+# Databases & Logs
+*.db
+*.sqlite
+*.sqlite3
+*.log
+backend.log
+
+# Python cache & Tests
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+tests/
+
+# Git & Backups
+.git/
+.gitignore
+backup/

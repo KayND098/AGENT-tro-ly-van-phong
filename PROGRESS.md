@@ -1,6 +1,6 @@
 # PROGRESS.md - Tiến Độ Dự Án Trợ Lý Văn Phòng AI
 
-## Trạng Thái Hiện Tại: Đã khắc phục lỗi đăng nhập Google PKCE & Hoàn thành Đa người dùng Phiên 2 (71/71 tests pass, Frontend build pass)
+## Trạng Thái Hiện Tại: Hoàn thành ĐÓNG GÓI BẢN v1 bằng Docker Compose & Chế độ Demo (87/87 tests pass, Frontend build pass, docker-compose config pass)
 
 - [x] Tạo `AGENTS.md` (luật hệ thống, phân quyền rủi ro tool)
 - [x] Tạo `docs/SKELETON_SPEC.md`
@@ -169,28 +169,83 @@
   - [x] **Bộ Kiểm Thử Đa Người Dùng Mới** (`backend/tests/test_multiuser_isolation.py` - 9/9 tests pass).
   - [x] Toàn bộ **67/67 tests pass** (100%) và `npm run build` thành công.
 
-- [x] **Vá Lỗi Đăng Nhập Google PKCE (`Missing code verifier`)**:
-  - [x] **Nguyên nhân**: Khi tạo URL đăng nhập, PKCE `code_verifier` được sinh nhưng ở `google_callback`, đối tượng `Flow` được tạo mới mà không có `code_verifier`, khiến `flow.fetch_token(code=code)` bị lỗi `InvalidGrantError: Missing code verifier`.
+- [x] **Vá Lỗi Đăng Nhập Google PKCE (`Missing code verifier`) & Chuẩn Hóa Callback**:
+  - [x] **Nguyên nhân**: Khi tạo URL đăng nhập, PKCE `code_verifier` được Google Flow tự sinh trong `authorization_url()`, nhưng ở `google_callback` đối tượng `Flow` được tạo mới và không có `code_verifier`, khiến `flow.fetch_token(code=code)` bị lỗi `InvalidGrantError: (invalid_grant) Missing code verifier`.
   - [x] **Khắc phục tại `backend/app/auth/state_store.py`**:
-    - Bổ sung `consume_state_with_status(state)`: trả về chính xác cặp `(state_data, status)`. Phân định rõ `state_invalid` (không tìm thấy hoặc đã dùng trước đó) và `state_expired` (quá 10 phút).
-    - Đảm bảo cơ chế dùng một lần duy nhất (`pop`).
+    - Thêm `save_state(state, nonce, code_verifier, purpose, user_id)`: lưu state cùng code_verifier và nonce với TTL 10 phút.
+    - Cập nhật `create_state`: hỗ trợ nhận code_verifier có sẵn từ Flow hoặc tự sinh nếu thiếu.
+    - `consume_state_with_status(state)`: dùng một lần duy nhất (`pop`), phân định rõ `state_invalid` và `state_expired`.
   - [x] **Khắc phục tại `backend/app/auth/router.py`**:
-    - `google_login`: Truyền `code_verifier=code_verifier` và `autogenerate_code_verifier=False` vào `Flow.from_client_secrets_file` để khóa giá trị PKCE duy nhất, không để thư viện tự sinh verifier khác.
-    - `google_callback`: Khởi tạo `Flow` với `redirect_uri` chuẩn, truyền `code_verifier` lấy từ state store và gọi `flow.fetch_token(code=code, code_verifier=code_verifier)`. Xóa state ngay lập tức.
-    - Phân tách rõ ràng các nhánh mã lỗi ngắn: `state_invalid`, `state_expired`, `code_missing`, `no_client_config`, `token_exchange_failed`, `id_token_invalid`, `nonce_mismatch`, `email_not_allowed`, `scope_changed`, `auth_failed`.
-    - Ghi log bằng `logging.exception` hoặc `logger.warning` chỉ chứa TÊN loại lỗi và mã lỗi, tuyệt đối không log token, authorization code hay cookie.
-  - [x] **Bộ Kiểm Thử Mới** (`TestPKCEAndErrorHandling` trong `backend/tests/test_auth.py`):
-    - Kiểm tra `flow.fetch_token` được gọi với đúng `code_verifier` sinh lúc login.
-    - Kiểm tra dùng state lần 2 bị từ chối (`state_invalid`).
-    - Kiểm tra state hết hạn bị từ chối (`state_expired`).
-    - Kiểm tra log lỗi tuyệt đối không rò rỉ authorization code hay token.
-  - [x] Toàn bộ **71/71 tests pass** (100%) và `npm run build` thành công.
+    - `google_login` & `connect_gmail`: Sau khi gọi `flow.authorization_url()`, lấy chính xác `flow.code_verifier` sinh ra và lưu vào state store.
+    - `google_callback`: Khởi tạo Flow với `redirect_uri` chuẩn, truyền `code_verifier=code_verifier` và `autogenerate_code_verifier=False`. Gọi `flow.fetch_token(code=code, code_verifier=code_verifier)`. Xóa state ngay lập tức.
+    - Chuẩn hóa toàn bộ nhánh lỗi callback: mã lỗi ngắn (`state_invalid`, `state_expired`, `code_missing`, `no_client_config`, `token_exchange_failed`, `id_token_invalid`, `nonce_mismatch`, `email_mismatch`, `email_not_allowed`, `scope_changed`, `auth_failed`).
+    - Ghi log bằng `logger.exception(..., exc_info=False)` đã che giấu mã code và token qua `_sanitize_oauth_log`, chỉ chứa tên loại lỗi và thông báo an toàn, tuyệt đối không rò rỉ token, authorization code hay cookie.
+    - Kiểm tra và xác nhận logic `ALLOWED_EMAILS`: biến thiếu hoặc rỗng cho mọi email Google vào; có giá trị thì lọc chính xác (không phân biệt hoa thường, bỏ khoảng trắng).
+  - [x] **Bộ Kiểm Thử Đầy Đủ** (`backend/tests/test_auth.py`):
+    - `test_15_flow_fetch_token_called_with_exact_code_verifier_from_login`: fetch_token nhận đúng code_verifier tạo lúc login.
+    - `test_16_state_used_twice_is_rejected`: state dùng lần hai bị từ chối (`state_invalid`).
+    - `test_17_expired_state_is_rejected`: state quá 10 phút bị từ chối (`state_expired`).
+    - `test_18_log_does_not_contain_code_or_token`: log không chứa authorization code hay token.
+    - `test_19_login_url_stores_code_verifier_in_state_store`: login URL lưu đúng code_verifier sinh ra vào state store.
+    - `test_6b_empty_allowed_emails_allows_any_google_user`: ALLOWED_EMAILS rỗng cho phép mọi email Google.
+    - `test_6c_allowed_emails_case_insensitive_and_whitespace`: ALLOWED_EMAILS chuẩn hóa hoa thường và khoảng trắng.
+  - [x] Toàn bộ **81/81 tests pass** (100%).
+
+- [x] **Đa người dùng - Phiên 3: Kết nối Google Workspace (Gmail) riêng biệt cho từng người dùng**:
+  - [x] **Database & Bảo mật Token SQLite** (`backend/app/auth/db_auth.py`):
+    - Bảng mới `user_google_tokens`: `user_id` (PRIMARY KEY, FOREIGN KEY tham chiếu `users(id)` ON DELETE CASCADE), `access_token`, `refresh_token`, `token_uri`, `client_id`, `client_secret`, `scopes`, `expiry`, `updated_at`.
+    - Các hàm CRUD: `upsert_user_google_token`, `get_user_google_token`, `delete_user_google_token` (bảo toàn refresh_token cũ khi làm mới).
+    - Bảo mật nghiêm ngặt: Tuyệt đối không log `access_token`, `refresh_token`, hoặc `client_secret`; che giấu thông tin nhạy cảm qua `sanitize_sensitive_data`.
+  - [x] **Luồng Cấp Quyền Bổ Sung (Incremental Authorization)** (`backend/app/auth/router.py` & `state_store.py`):
+    - Mở rộng `state_store.py` lưu trữ kèm `purpose` (`"login"` hoặc `"connect_gmail"`) và `user_id`.
+    - Endpoint `GET /auth/google/connect-gmail` (yêu cầu `require_user`): tạo OAuth URL PKCE với scope `IDENTITY_SCOPES + https://www.googleapis.com/auth/gmail.readonly`, `include_granted_scopes="true"`, `prompt="consent"`, `login_hint=user["email"]`.
+    - Endpoint `GET /auth/google/callback`:
+      - Khi `purpose == "connect_gmail"`: kiểm tra email từ `id_token` phải khớp chính xác với email của tài khoản đang đăng nhập (chống liên kết nhầm tài khoản khác). Nếu khớp, lưu credentials vào bảng `user_google_tokens` và chuyển hướng về `APP_BASE_URL/?gmail_connected=1`. Nếu không khớp, trả về `?error=email_mismatch`.
+    - Endpoint `POST /auth/google/disconnect-gmail` (yêu cầu `require_user` + `_check_csrf`): xóa sạch token trong DB.
+    - Cập nhật `GET /auth/me`: trả về thêm thuộc tính `gmail_connected: bool`.
+  - [x] **Cập nhật `GmailProvider` & Tool `search_email`** (`backend/app/providers/gmail_provider.py` & `backend/app/tools/email.py`):
+    - `GmailProvider` hỗ trợ khởi tạo từ dict `token_data` và `user_id` trong DB SQLite.
+    - Tự động làm mới token hết hạn (`creds.expired and creds.refresh_token`) và lưu lại `access_token` + `expiry` mới vào SQLite cho `user_id` đó.
+    - `search_email_handler`: lấy token theo `user["id"]`. Nếu người dùng chưa kết nối Gmail, trả thông báo thân thiện: *"Tài khoản của bạn chưa kết nối Gmail. Vui lòng mở menu tài khoản ở góc trên bên phải và chọn 'Kết nối Gmail'."* (Loại bỏ phụ thuộc `GMAIL_OWNER_EMAIL`).
+  - [x] **Giao diện Frontend MD3** (`frontend/src/`):
+    - Cập nhật type `User`: `gmail_connected?: boolean`.
+    - Tách component `UserMenu.tsx` (< 200 dòng): hiển thị trạng thái kết nối Gmail, nút "Kết nối Gmail" / "Ngắt kết nối Gmail" kèm thông báo trực quan.
+    - `TopBar.tsx` (< 200 dòng) tích hợp `UserMenu`.
+    - `App.tsx`: xử lý query params `?gmail_connected=1` và `?error=...`, hiển thị Snackbar thông báo thành công / lỗi và dọn URL bằng `window.history.replaceState`.
+  - [x] **Kiểm thử Unit Tests Toàn Diện** (`backend/tests/test_multiuser_gmail.py` - 7/7 tests pass, mock 100%):
+    - Cách ly token Gmail giữa các user: User A kết nối tìm được thư của A, User B chưa kết nối nhận thông báo thân thiện, không thể đọc token của A.
+    - Từ chối liên kết khi chọn tài khoản Google khác email app (`email_mismatch`).
+    - Tự động refresh token hết hạn và cập nhật DB.
+    - Ngắt kết nối Gmail và cập nhật trạng thái `gmail_connected: false`.
+    - Kiểm tra bảo vệ CSRF trên route disconnect.
+  - [x] Toàn bộ **78/78 tests pass** (100%) và `npm run build` thành công.
+
+- [x] **Đóng Gói Bản v1 bằng Docker Compose & Chế Độ Demo**:
+  - [x] `backend/Dockerfile`: Base `python:3.12-slim`, non-root user `appuser` (UID 1000), `HEALTHCHECK` gọi `/health`, dữ liệu (SQLite, RAG) trỏ vào volume `/data`, đóng gói tài liệu mẫu `data/docs` vào image, chạy `uvicorn` không dùng `--reload`.
+  - [x] `frontend/Dockerfile` & `nginx.conf`: Dockerfile nhiều giai đoạn (Stage 1: build bằng `node:20-alpine`; Stage 2: phục vụ file tĩnh bằng `nginx:alpine`). `nginx.conf` reverse proxy các route `/chat`, `/actions`, `/audit`, `/auth`, `/health` sang `http://backend:8000`, giữ nguyên cookie và header `X-Requested-With`, `Origin`.
+  - [x] `docker-compose.yml`: Hai dịch vụ `backend` và `frontend`, volume `office_data:/data`, mạng nội bộ `office_net`. Ánh xạ cổng frontend `127.0.0.1:5173:80` an toàn, có chú thích cảnh báo rủi ro khi mở mạng LAN (`0.0.0.0:5173:80`). Nạp `.env` tùy chọn với `required: false`. Backend không mở cổng ra máy chủ.
+  - [x] `.dockerignore` (gốc, backend, frontend): Chặn triệt để `.env`, `secrets/`, `*.db`, `*.log`, `node_modules`, `dist`, `__pycache__`, `token*.json`, `client_secret*.json`.
+  - [x] **Chế độ Demo (`AUTH_MODE`)**:
+    - Mã nguồn mặc định an toàn là `google`, chỉ bật demo khi `AUTH_MODE=demo`. `.env.example` và docker-compose fallback mặc định demo để chạy thử nhanh 1 lệnh không cần cấu hình Google/Gemini.
+    - Demo tự động tạo người dùng "Demo", tự cấp session và cookie, bảo toàn cơ chế phiên, CSRF và phân quyền theo `user_id`.
+    - Ép `EMAIL_PROVIDER=mock`, vô hiệu kết nối Gmail và không đọc `token.json`. `LLM_PROVIDER` mặc định `fake`, chỉ dùng Gemini khi người dùng tự cung cấp `GEMINI_API_KEY`.
+    - Từ chối khởi động nếu `APP_BASE_URL` là https hoặc tên miền ngoài localhost (`validate_demo_mode_or_raise`). Ghi log cảnh báo an toàn khi khởi động.
+  - [x] **Frontend MD3**: Hiển thị banner *"Chế độ demo: dữ liệu mẫu, không kết nối Gmail"* ngay dưới TopBar khi `user.demo_mode=true`, hỗ trợ responsive và Dark Mode.
+  - [x] **README.md & .env.example**: Viết lại README ngắn gọn tiếng Việt đầy đủ 5 mục (chạy thử nhanh 1 lệnh, các thử nghiệm gợi ý, dùng Gemini thật, dùng Google OAuth, và xử lý sự cố / lưu ý an toàn). Cập nhật `.env.example` đầy đủ các biến mới.
+  - [x] **Bộ kiểm thử Unit Tests Docker v1 & Demo** (`backend/tests/test_docker_v1_demo.py` - 6 tests mock 100%):
+    - `AUTH_MODE` thiếu hoặc sai -> hành vi google, không bao giờ demo.
+    - `AUTH_MODE=demo` -> `/auth/me` trả người dùng demo; cô lập dữ liệu theo `user_id` vẫn đúng.
+    - Demo ép `EMAIL_PROVIDER=mock` dù cấu hình khác; không đọc `token.json`.
+    - Demo từ chối khởi động khi `APP_BASE_URL` là https hoặc tên miền ngoài.
+    - Ở demo, `send_email` và `delete_rows` vẫn bắt buộc đi qua `pending_action`.
+    - Đường dẫn dữ liệu đọc từ biến môi trường (`DATABASE_PATH`, `DOCS_DIR`), không ghi vào mã nguồn.
+  - [x] Toàn bộ **87/87 tests pass** (100%), `npm run build` thành công, `docker-compose config` hợp lệ.
 
 ---
 
 ## Lộ Trình Tương Lai (Roadmap / Việc Còn Nợ)
 - [x] **Đa người dùng - Phiên 2**: Tách biệt dữ liệu theo người dùng (`pending_actions`, `audit_log`, lịch sử chat phân theo `user_id`).
-- [ ] **Đa người dùng - Phiên 3**: Kết nối Gmail và Google Workspace riêng biệt cho từng người dùng.
+- [x] **Đa người dùng - Phiên 3**: Kết nối Gmail và Google Workspace riêng biệt cho từng người dùng.
 - [ ] **Phiên 2B của LLM thật**: Cơ chế retry khi gặp lỗi 503/429 + cấu hình mô hình dự phòng `GEMINI_FALLBACK_MODEL`.
 - [ ] Thêm câu mẫu cho `FakeLLM` để nhận diện và sinh lệnh `create_event`.
 - [ ] Backend: Sinh lại dry-run `preview` (cập nhật `sample_rows_preview`) khi người dùng duyệt kèm `edited_args` cho `delete_rows`.

@@ -274,9 +274,77 @@ class TestAllowedEmails(unittest.TestCase):
             resp = client.get(f"/auth/google/callback?state={state}&code=code", follow_redirects=False)
 
         self.assertEqual(resp.status_code, 302)
-        self.assertTrue(
-            "error=email_not_allowed" in resp.headers["location"] or "error=not_allowed" in resp.headers["location"]
-        )
+        self.assertIn("error=email_not_allowed", resp.headers["location"])
+
+    def test_6b_empty_allowed_emails_allows_any_google_user(self):
+        """ALLOWED_EMAILS rỗng hoặc không thiết lập -> cho MỌI email được Google chấp nhận."""
+        os.environ.pop("ALLOWED_EMAILS", None)
+        nonce = secrets.token_urlsafe(16)
+        state, cv, cc = create_state(nonce)
+
+        mock_flow_instance = MagicMock()
+        mock_creds = MagicMock()
+        mock_creds.id_token = "token"
+        mock_flow_instance.credentials = mock_creds
+
+        fake_id_info = {
+            "sub": "any_sub_999",
+            "email": "anyone@anywhere.org",
+            "name": "Anyone",
+            "nonce": nonce,
+        }
+
+        with patch("app.auth.router.get_web_client_file") as mock_cf, \
+             patch("google_auth_oauthlib.flow.Flow.from_client_secrets_file", return_value=mock_flow_instance), \
+             patch("google.oauth2.id_token.verify_oauth2_token", return_value=fake_id_info), \
+             patch("pathlib.Path.exists", return_value=True), \
+             patch("pathlib.Path.read_text", return_value='{"web":{"client_id":"id"}}'):
+
+            mock_path = MagicMock()
+            mock_path.exists.return_value = True
+            mock_path.read_text.return_value = '{"web":{"client_id":"id"}}'
+            mock_cf.return_value = mock_path
+
+            client = TestClient(app)
+            resp = client.get(f"/auth/google/callback?state={state}&code=code", follow_redirects=False)
+
+        self.assertEqual(resp.status_code, 302)
+        self.assertNotIn("error=", resp.headers.get("location", ""))
+
+    def test_6c_allowed_emails_case_insensitive_and_whitespace(self):
+        """ALLOWED_EMAILS không phân biệt hoa thường và bỏ khoảng trắng."""
+        os.environ["ALLOWED_EMAILS"] = "  Allowed@Company.COM  "
+        nonce = secrets.token_urlsafe(16)
+        state, cv, cc = create_state(nonce)
+
+        mock_flow_instance = MagicMock()
+        mock_creds = MagicMock()
+        mock_creds.id_token = "token"
+        mock_flow_instance.credentials = mock_creds
+
+        fake_id_info = {
+            "sub": "sub_case_test",
+            "email": "ALLOWED@COMPANY.com",
+            "name": "Allowed User",
+            "nonce": nonce,
+        }
+
+        with patch("app.auth.router.get_web_client_file") as mock_cf, \
+             patch("google_auth_oauthlib.flow.Flow.from_client_secrets_file", return_value=mock_flow_instance), \
+             patch("google.oauth2.id_token.verify_oauth2_token", return_value=fake_id_info), \
+             patch("pathlib.Path.exists", return_value=True), \
+             patch("pathlib.Path.read_text", return_value='{"web":{"client_id":"id"}}'):
+
+            mock_path = MagicMock()
+            mock_path.exists.return_value = True
+            mock_path.read_text.return_value = '{"web":{"client_id":"id"}}'
+            mock_cf.return_value = mock_path
+
+            client = TestClient(app)
+            resp = client.get(f"/auth/google/callback?state={state}&code=code", follow_redirects=False)
+
+        self.assertEqual(resp.status_code, 302)
+        self.assertNotIn("error=", resp.headers.get("location", ""))
 
 
 class TestSessionCookieExpiry(unittest.TestCase):
@@ -600,7 +668,36 @@ class TestPKCEAndErrorHandling(unittest.TestCase):
             # Kiểm tra tất cả các dòng log sinh ra không chứa secret_code hay secret_token
             all_logs = " ".join(log_cm.output)
             self.assertNotIn(secret_code, all_logs)
+            self.assertNotIn(secret_token, all_logs)
             self.assertIn("token_exchange_failed", all_logs)
+
+    def test_19_login_url_stores_code_verifier_in_state_store(self):
+        """GET /auth/google/login khởi tạo Flow và lưu đúng code_verifier sinh ra vào state_store."""
+        expected_verifier = "a" * 64
+        mock_flow = MagicMock()
+        mock_flow.code_verifier = expected_verifier
+        mock_flow.authorization_url.return_value = ("https://accounts.google.com/o/oauth2/v2/auth?state=xyz", "xyz")
+
+        with patch("app.auth.router.get_web_client_file") as mock_cf, \
+             patch("google_auth_oauthlib.flow.Flow.from_client_secrets_file", return_value=mock_flow), \
+             patch("pathlib.Path.exists", return_value=True), \
+             patch("pathlib.Path.read_text", return_value='{"web":{"client_id":"cid"}}'):
+
+            mock_path = MagicMock()
+            mock_path.exists.return_value = True
+            mock_path.read_text.return_value = '{"web":{"client_id":"cid"}}'
+            mock_cf.return_value = mock_path
+
+            client = TestClient(app)
+            resp = client.get("/auth/google/login", follow_redirects=False)
+
+        self.assertEqual(resp.status_code, 302)
+        self.assertIn("accounts.google.com", resp.headers["location"])
+
+        # Kiểm tra trong state store có entry chứa đúng code_verifier này
+        with _lock:
+            stored_verifiers = [v["code_verifier"] for v in _store.values()]
+        self.assertIn(expected_verifier, stored_verifiers)
 
 
 if __name__ == "__main__":

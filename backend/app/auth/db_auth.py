@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 def init_auth_tables(db_path: Optional[str] = None) -> None:
-    """Tạo bảng users và sessions nếu chưa có (idempotent)."""
+    """Tạo bảng users, sessions và user_google_tokens nếu chưa có (idempotent)."""
     path = db_path or get_db_path()
     with get_db(path) as conn:
         conn.executescript("""
@@ -38,10 +38,72 @@ def init_auth_tables(db_path: Optional[str] = None) -> None:
                 FOREIGN KEY(user_id) REFERENCES users(id)
             );
 
+            CREATE TABLE IF NOT EXISTS user_google_tokens (
+                user_id       INTEGER PRIMARY KEY,
+                access_token  TEXT NOT NULL,
+                refresh_token TEXT,
+                token_uri     TEXT,
+                client_id     TEXT,
+                scopes        TEXT NOT NULL,
+                expiry        TEXT,
+                updated_at    TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+
             CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
             CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+            CREATE INDEX IF NOT EXISTS idx_user_google_tokens_user_id ON user_google_tokens(user_id);
         """)
-        conn.commit()
+
+        # Migration idempotent: Xóa cột client_secret khỏi user_google_tokens nếu còn tồn tại
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(user_google_tokens)")
+        token_cols = [r["name"] for r in cursor.fetchall()]
+        if "client_secret" in token_cols:
+            try:
+                cursor.execute("ALTER TABLE user_google_tokens DROP COLUMN client_secret;")
+                conn.commit()
+            except Exception:
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS _user_google_tokens_temp (
+                        user_id       INTEGER PRIMARY KEY,
+                        access_token  TEXT NOT NULL,
+                        refresh_token TEXT,
+                        token_uri     TEXT,
+                        client_id     TEXT,
+                        scopes        TEXT NOT NULL,
+                        expiry        TEXT,
+                        updated_at    TEXT NOT NULL,
+                        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+                    );
+                """)
+                cursor.execute("""
+                    INSERT INTO _user_google_tokens_temp (user_id, access_token, refresh_token, token_uri, client_id, scopes, expiry, updated_at)
+                    SELECT user_id, access_token, refresh_token, token_uri, client_id, scopes, expiry, updated_at FROM user_google_tokens;
+                """)
+                cursor.execute("DROP TABLE user_google_tokens;")
+                cursor.execute("ALTER TABLE _user_google_tokens_temp RENAME TO user_google_tokens;")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_google_tokens_user_id ON user_google_tokens(user_id);")
+                conn.commit()
+
+        # Migration: Xử lý dữ liệu token cũ dạng plaintext (mã hóa lại nếu có key, xóa nếu không có key hoặc hỏng)
+        try:
+            from .crypto import encrypt_token, TokenEncryptionError
+            rows = conn.execute("SELECT user_id, access_token, refresh_token FROM user_google_tokens").fetchall()
+            for r in rows:
+                uid = r["user_id"]
+                acc = r["access_token"]
+                ref = r["refresh_token"]
+                if acc and not acc.startswith("gAAAAA"):
+                    try:
+                        enc_acc = encrypt_token(acc)
+                        enc_ref = encrypt_token(ref) if (ref and not ref.startswith("gAAAAA")) else ref
+                        conn.execute("UPDATE user_google_tokens SET access_token = ?, refresh_token = ? WHERE user_id = ?", (enc_acc, enc_ref, uid))
+                    except TokenEncryptionError:
+                        conn.execute("DELETE FROM user_google_tokens WHERE user_id = ?", (uid,))
+            conn.commit()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -162,3 +224,129 @@ def delete_session(token: str, db_path: Optional[str] = None) -> None:
     with get_db(path) as conn:
         conn.execute("DELETE FROM sessions WHERE id_hash = ?", (id_hash,))
         conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Google Workspace OAuth Token helpers (Per-User)
+# Tuyệt đối không log access_token, refresh_token hoặc client_secret
+# ---------------------------------------------------------------------------
+
+def upsert_user_google_token(
+    user_id: int,
+    access_token: str,
+    refresh_token: Optional[str] = None,
+    token_uri: Optional[str] = None,
+    client_id: Optional[str] = None,
+    client_secret: Optional[str] = None,
+    scopes: str = "",
+    expiry: Optional[str] = None,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Lưu hoặc cập nhật OAuth token Google Workspace cho user_id cụ thể.
+    - access_token và refresh_token BẮT BUỘC được mã hóa bằng Fernet qua biến TOKEN_ENCRYPTION_KEY.
+    - Thiếu hoặc sai khóa -> raise TokenEncryptionError (từ chối lưu dạng thường).
+    - TUYỆT ĐỐI KHÔNG lưu client_secret vào DB.
+    - Giữ lại refresh_token cũ nếu giá trị mới là None (tránh mất refresh token).
+    """
+    from .crypto import encrypt_token
+
+    # Mã hóa bắt buộc trước khi lưu vào DB
+    enc_access_token = encrypt_token(access_token)
+    enc_refresh_token = encrypt_token(refresh_token) if refresh_token else None
+
+    init_auth_tables(db_path)
+    path = db_path or get_db_path()
+    now = datetime.now(timezone.utc).isoformat()
+    with get_db(path) as conn:
+        conn.execute(
+            """
+            INSERT INTO user_google_tokens (
+                user_id, access_token, refresh_token, token_uri, client_id, scopes, expiry, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                access_token  = excluded.access_token,
+                refresh_token = COALESCE(excluded.refresh_token, user_google_tokens.refresh_token),
+                token_uri     = COALESCE(excluded.token_uri, user_google_tokens.token_uri),
+                client_id     = COALESCE(excluded.client_id, user_google_tokens.client_id),
+                scopes        = excluded.scopes,
+                expiry        = excluded.expiry,
+                updated_at    = excluded.updated_at
+            """,
+            (user_id, enc_access_token, enc_refresh_token, token_uri, client_id, scopes, expiry, now),
+        )
+        conn.commit()
+
+    return {
+        "user_id": user_id,
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_uri": token_uri,
+        "client_id": client_id,
+        "scopes": scopes,
+        "expiry": expiry,
+        "updated_at": now,
+    }
+
+
+def get_user_google_token(user_id: int, db_path: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """
+    Lấy Google OAuth token của user_id nếu có.
+    Tự động giải mã access_token và refresh_token bằng Fernet.
+    Nếu giải mã thất bại (sai key, dữ liệu hỏng hoặc plaintext cũ) -> xóa bản ghi hỏng và trả về None.
+    Tuyệt đối không trả client_secret.
+    """
+    init_auth_tables(db_path)
+    path = db_path or get_db_path()
+    with get_db(path) as conn:
+        row = conn.execute(
+            "SELECT user_id, access_token, refresh_token, token_uri, client_id, scopes, expiry, updated_at "
+            "FROM user_google_tokens WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+
+        from .crypto import decrypt_token
+        dec_access = decrypt_token(d["access_token"])
+        if not dec_access:
+            # Giải mã thất bại: sai key hoặc dữ liệu plaintext cũ không giải mã được -> xóa bản ghi để bảo vệ
+            conn.execute("DELETE FROM user_google_tokens WHERE user_id = ?", (user_id,))
+            conn.commit()
+            logger.warning("Token của user_id=%s không thể giải mã, đã xóa bản ghi để bảo mật.", user_id)
+            return None
+
+        d["access_token"] = dec_access
+        if d.get("refresh_token"):
+            dec_refresh = decrypt_token(d["refresh_token"])
+            d["refresh_token"] = dec_refresh
+
+        return d
+
+
+def delete_user_google_token(user_id: int, db_path: Optional[str] = None) -> None:
+    """Xóa Google OAuth token của user_id (ngắt kết nối Google Workspace)."""
+    init_auth_tables(db_path)
+    path = db_path or get_db_path()
+    with get_db(path) as conn:
+        conn.execute("DELETE FROM user_google_tokens WHERE user_id = ?", (user_id,))
+        conn.commit()
+
+
+def get_or_create_demo_user(db_path: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Lấy hoặc tạo người dùng Demo cố định (chế độ AUTH_MODE=demo).
+    Dữ liệu gắn với user_id của người dùng Demo trong bảng users.
+    """
+    init_auth_tables(db_path)
+    return upsert_user(
+        google_sub="demo_sub_001",
+        email="demo@office-assistant.local",
+        name="Demo",
+        picture=None,
+        db_path=db_path,
+    )
+
+

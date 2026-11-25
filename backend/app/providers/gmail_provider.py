@@ -1,5 +1,6 @@
 import logging
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
@@ -40,6 +41,7 @@ class GmailProvider:
     """
     GmailProvider kết nối với Google Workspace Gmail API (CHỈ ĐỌC).
     Cùng interface với MockEmailProvider.
+    Hỗ trợ khởi tạo từ DB token của user_id hoặc fallback file secrets/token.json.
     """
 
     def __init__(
@@ -47,19 +49,26 @@ class GmailProvider:
         client_secret_path: Optional[Path] = None,
         token_path: Optional[Path] = None,
         service: Optional[Any] = None,
+        token_data: Optional[Dict[str, Any]] = None,
+        user_id: Optional[int] = None,
     ):
         self.client_secret_path = client_secret_path or DEFAULT_CLIENT_SECRET_FILE
         self.token_path = token_path or DEFAULT_TOKEN_FILE
         self.scopes = SCOPES
         self.service = service
+        self.token_data = token_data
+        self.user_id = user_id
 
     def is_ready(self) -> bool:
         """
         Kiểm tra xem provider đã có đủ điều kiện để hoạt động hay chưa:
         - Đã inject service trực tiếp (dùng cho testing/mock)
-        - Hoặc tồn tại cả client_secret_path và token_path (đã đăng nhập qua google_login.py)
+        - Có token_data hợp lệ từ DB
+        - Hoặc tồn tại cả client_secret_path và token_path (file chung)
         """
         if self.service is not None:
+            return True
+        if self.token_data is not None and self.token_data.get("access_token"):
             return True
         return (
             self.client_secret_path.exists()
@@ -70,33 +79,75 @@ class GmailProvider:
     def _get_service(self):
         """
         Khởi tạo hoặc trả về Google API Resource cho Gmail.
-        Tự động làm mới (refresh) token nếu token hết hạn nhưng còn refresh_token.
+        Tự động làm mới (refresh) token nếu token hết hạn nhưng còn refresh_token,
+        và cập nhật lại access_token + expiry mới vào DB (nếu có user_id) hoặc file.
         """
         if self.service is not None:
             return self.service
-
-        if not self.token_path.exists():
-            logger.warning(
-                "Không tìm thấy file token tại %s. Vui lòng chạy backend/google_login.py để đăng nhập.",
-                self.token_path,
-            )
-            return None
 
         try:
             from google.oauth2.credentials import Credentials
             from google.auth.transport.requests import Request
             from googleapiclient.discovery import build
 
-            creds = Credentials.from_authorized_user_file(str(self.token_path), self.scopes)
+            creds = None
+            if self.token_data is not None:
+                # Khởi tạo Credentials từ DB token
+                expiry = None
+                if self.token_data.get("expiry"):
+                    try:
+                        expiry_dt = datetime.fromisoformat(self.token_data["expiry"])
+                        if expiry_dt.tzinfo is not None:
+                            expiry_dt = expiry_dt.astimezone(timezone.utc).replace(tzinfo=None)
+                        expiry = expiry_dt
+                    except Exception:
+                        pass
+
+                scopes_val = self.token_data.get("scopes") or SCOPES
+                if isinstance(scopes_val, str):
+                    scopes_val = scopes_val.split()
+
+                from app.auth.config import get_web_client_credentials
+                web_client_id, web_client_secret = get_web_client_credentials()
+
+                creds = Credentials(
+                    token=self.token_data.get("access_token"),
+                    refresh_token=self.token_data.get("refresh_token"),
+                    token_uri=self.token_data.get("token_uri") or "https://oauth2.googleapis.com/token",
+                    client_id=web_client_id or self.token_data.get("client_id"),
+                    client_secret=web_client_secret,
+                    scopes=scopes_val,
+                    expiry=expiry,
+                )
+            elif self.token_path.exists():
+                creds = Credentials.from_authorized_user_file(str(self.token_path), self.scopes)
+            else:
+                logger.warning("Không tìm thấy thông tin token cho Gmail.")
+                return None
 
             # Tự động làm mới token nếu đã hết hạn và có refresh_token
             if creds and creds.expired and creds.refresh_token:
                 try:
                     creds.refresh(Request())
-                    # Lưu lại token đã làm mới vào file
-                    with open(self.token_path, "w", encoding="utf-8") as f:
-                        f.write(creds.to_json())
-                    logger.info("Đã tự động làm mới Gmail token thành công.")
+                    # Cập nhật lại token đã làm mới vào DB hoặc file
+                    if self.user_id is not None:
+                        from app.auth.db_auth import upsert_user_google_token
+                        expiry_iso = creds.expiry.replace(tzinfo=timezone.utc).isoformat() if creds.expiry else None
+                        scopes_str = " ".join(creds.scopes) if isinstance(creds.scopes, (list, tuple, set)) else str(creds.scopes or "")
+                        upsert_user_google_token(
+                            user_id=self.user_id,
+                            access_token=creds.token or "",
+                            refresh_token=creds.refresh_token,
+                            token_uri=getattr(creds, "token_uri", None),
+                            client_id=getattr(creds, "client_id", None) or web_client_id,
+                            scopes=scopes_str,
+                            expiry=expiry_iso,
+                        )
+                        logger.info("Đã tự động làm mới và cập nhật Gmail token cho user_id=%s vào DB.", self.user_id)
+                    elif self.token_path.exists():
+                        with open(self.token_path, "w", encoding="utf-8") as f:
+                            f.write(creds.to_json())
+                        logger.info("Đã tự động làm mới Gmail token file thành công.")
                 except Exception as refresh_err:
                     clean_err = sanitize_sensitive_data(str(refresh_err))
                     logger.exception("Không thể làm mới token Gmail: %s", clean_err)

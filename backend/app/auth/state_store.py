@@ -39,19 +39,48 @@ def generate_pkce() -> tuple[str, str]:
     return code_verifier, code_challenge
 
 
-def create_state(nonce: str) -> tuple[str, str, str]:
-    """
-    Tạo và lưu state mới. Trả về (state, code_verifier, code_challenge).
-    """
-    state = secrets.token_urlsafe(32)
-    code_verifier, code_challenge = generate_pkce()
+def save_state(
+    state: str,
+    nonce: str,
+    code_verifier: str,
+    purpose: str = "login",
+    user_id: Optional[int] = None,
+) -> None:
+    """Lưu state đã có code_verifier vào kho với TTL 10 phút."""
     with _lock:
         _prune()
         _store[state] = {
             "nonce": nonce,
             "code_verifier": code_verifier,
+            "purpose": purpose,
+            "user_id": user_id,
             "expires_at": _now() + timedelta(seconds=_STATE_TTL_SECONDS),
         }
+
+
+def create_state(
+    nonce: str,
+    purpose: str = "login",
+    user_id: Optional[int] = None,
+    code_verifier: Optional[str] = None,
+) -> tuple[str, str, str]:
+    """
+    Tạo và lưu state mới. Trả về (state, code_verifier, code_challenge).
+    Hỗ trợ truyền sẵn code_verifier từ flow hoặc tự sinh nếu chưa có.
+    """
+    state = secrets.token_urlsafe(32)
+    if not code_verifier:
+        code_verifier, code_challenge = generate_pkce()
+    else:
+        digest = hashlib.sha256(code_verifier.encode()).digest()
+        code_challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+    save_state(
+        state=state,
+        nonce=nonce,
+        code_verifier=code_verifier,
+        purpose=purpose,
+        user_id=user_id,
+    )
     return state, code_verifier, code_challenge
 
 
@@ -59,7 +88,7 @@ def consume_state_with_status(state: str) -> tuple[Optional[Dict[str, Any]], str
     """
     Lấy và xóa entry theo state (dùng một lần duy nhất).
     Trả về (data, status):
-    - status = "valid": data = {"nonce": ..., "code_verifier": ...}
+    - status = "valid": data = {"nonce": ..., "code_verifier": ..., "purpose": ..., "user_id": ...}
     - status = "state_invalid": state không tồn tại hoặc đã bị dùng
     - status = "state_expired": state đã hết hạn (TTL 10 phút)
     """
@@ -71,7 +100,12 @@ def consume_state_with_status(state: str) -> tuple[Optional[Dict[str, Any]], str
         return None, "state_invalid"
     if _now() > entry["expires_at"]:
         return None, "state_expired"
-    return {"nonce": entry["nonce"], "code_verifier": entry["code_verifier"]}, "valid"
+    return {
+        "nonce": entry["nonce"],
+        "code_verifier": entry["code_verifier"],
+        "purpose": entry.get("purpose", "login"),
+        "user_id": entry.get("user_id"),
+    }, "valid"
 
 
 def consume_state(state: str) -> Optional[Dict[str, Any]]:

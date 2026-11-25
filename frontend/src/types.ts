@@ -5,6 +5,8 @@ export interface User {
   email: string;
   name: string;
   picture?: string | null;
+  gmail_connected?: boolean;
+  demo_mode?: boolean;
 }
 
 export interface PendingAction {

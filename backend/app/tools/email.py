@@ -98,14 +98,26 @@ mock_email_provider = MockEmailProvider()
 email_provider = mock_email_provider
 
 
+def _is_demo_mode() -> bool:
+    try:
+        from app.auth.config import is_demo_mode
+        return is_demo_mode()
+    except Exception:
+        return os.getenv("AUTH_MODE", "google").strip().lower() == "demo"
+
+
 def get_email_provider():
     """
     Factory: chọn provider theo biến môi trường EMAIL_PROVIDER.
+    - Ở chế độ demo (AUTH_MODE=demo): ép dùng MockEmailProvider, không bao giờ đọc token.json.
     - EMAIL_PROVIDER=mock (mặc định): dùng MockEmailProvider.
     - EMAIL_PROVIDER=google: thử dùng GmailProvider;
       nếu thiếu client_secret.json hoặc token.json hoặc xảy ra lỗi thì
       tự động fallback về MockEmailProvider kèm cảnh báo thân thiện (không crash).
     """
+    if _is_demo_mode():
+        return mock_email_provider
+
     provider_name = os.getenv("EMAIL_PROVIDER", "mock").strip().lower()
     if provider_name != "google":
         return mock_email_provider
@@ -150,38 +162,74 @@ def get_email_provider():
 def search_email_handler(query: str, user: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     Handler tìm kiếm email.
-    Dùng provider chọn theo EMAIL_PROVIDER. Lỗi API trả thông báo thân thiện, không crash.
-    Nội dung trả về được vòng lặp Agent đánh dấu là DỮ LIỆU (cơ chế hiện tại giữ nguyên).
-    Chốt chặn an toàn: Nếu EMAIL_PROVIDER=google và GMAIL_OWNER_EMAIL được đặt,
-    chỉ tài khoản khớp mới được đọc Gmail token.json chung.
+    - Ở chế độ demo (AUTH_MODE=demo): ép MockEmailProvider.
+    - Khi EMAIL_PROVIDER=mock: dùng MockEmailProvider.
+    - Khi EMAIL_PROVIDER=google: lấy token theo user["id"] từ DB SQLite (user_google_tokens).
+      Nếu chưa kết nối Gmail, trả thông báo thân thiện yêu cầu kết nối qua menu tài khoản.
     """
     provider_name = os.getenv("EMAIL_PROVIDER", "mock").strip().lower()
-    gmail_owner = os.getenv("GMAIL_OWNER_EMAIL", "").strip().lower()
 
-    if provider_name == "google" and gmail_owner:
-        user_email = (user.get("email", "") if isinstance(user, dict) else "").strip().lower()
-        if user_email != gmail_owner:
-            logger.info("Chốt chặn an toàn: Tài khoản '%s' không phải GMAIL_OWNER_EMAIL ('%s').", user_email, gmail_owner)
+    if _is_demo_mode() or provider_name != "google":
+        provider = get_email_provider()
+        try:
+            emails = provider.search_email(query=query)
+            return {"query": query, "count": len(emails), "emails": emails}
+        except Exception as exc:
+            logger.exception("Lỗi khi tìm kiếm email qua %s: %s", type(provider).__name__, type(exc).__name__)
             return {
                 "query": query,
                 "count": 0,
                 "emails": [],
-                "error": "Tài khoản này chưa kết nối Gmail",
-                "message": "Tài khoản này chưa kết nối Gmail",
+                "error": "Không thể tìm kiếm email lúc này. Vui lòng thử lại hoặc kiểm tra kết nối tài khoản Google.",
             }
 
-    provider = get_email_provider()
-    try:
-        emails = provider.search_email(query=query)
-        return {"query": query, "count": len(emails), "emails": emails}
-    except Exception as exc:
-        # Ghi log không kèm token; trả thông báo thân thiện
-        logger.exception("Lỗi khi tìm kiếm email qua %s: %s", type(provider).__name__, type(exc).__name__)
+    # EMAIL_PROVIDER == 'google'
+    user_id = user.get("id") if isinstance(user, dict) else None
+    if user_id is None:
+        err_msg = "Tài khoản của bạn chưa kết nối Gmail. Vui lòng mở menu tài khoản ở góc trên bên phải và chọn 'Kết nối Gmail'."
         return {
             "query": query,
             "count": 0,
             "emails": [],
-            "error": "Không thể tìm kiếm email lúc này. Vui lòng thử lại hoặc kiểm tra kết nối tài khoản Google.",
+            "error": "gmail_not_connected",
+            "message": err_msg,
+        }
+
+    # Kiểm tra token riêng của user trong DB
+    token_data = None
+    try:
+        from app.auth.db_auth import get_user_google_token
+        token_data = get_user_google_token(user_id)
+    except Exception as exc:
+        logger.warning("Không thể đọc user_google_token từ DB: %s", type(exc).__name__)
+
+    if not token_data or not token_data.get("access_token"):
+        err_msg = "Tài khoản của bạn chưa kết nối Gmail. Vui lòng mở menu tài khoản ở góc trên bên phải và chọn 'Kết nối Gmail'."
+        return {
+            "query": query,
+            "count": 0,
+            "emails": [],
+            "error": "gmail_not_connected",
+            "message": err_msg,
+        }
+
+    # Dùng đúng provider theo token của user; tuyệt đối không fallback về token.json chung hay mock
+    from app.providers.gmail_provider import GmailProvider, sanitize_sensitive_data
+    provider = GmailProvider(token_data=token_data, user_id=user_id)
+
+    try:
+        emails = provider.search_email(query=query)
+        return {"query": query, "count": len(emails), "emails": emails}
+    except Exception as exc:
+        clean_err = sanitize_sensitive_data(str(exc))
+        logger.warning("Lỗi khi tìm kiếm email qua GmailProvider: %s", clean_err)
+        err_msg = "Kết nối Gmail đã hết hạn hoặc không thể truy cập. Vui lòng kết nối lại Gmail trong menu tài khoản."
+        return {
+            "query": query,
+            "count": 0,
+            "emails": [],
+            "error": "gmail_not_connected",
+            "message": err_msg,
         }
 
 

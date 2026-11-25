@@ -1,12 +1,26 @@
-FROM node:20-alpine
+# Giai đoạn 1: Build React SPA bằng Node
+FROM node:20-alpine AS builder
 
 WORKDIR /app
 
-COPY package.json ./
-RUN npm install
+# Cài đặt dependencies (sử dụng cache)
+COPY package.json package-lock.json ./
+RUN npm ci || npm install
 
+# Sao chép toàn bộ mã nguồn frontend và thực hiện build
 COPY . .
+RUN npm run build
 
-EXPOSE 5173
+# Giai đoạn 2: Phục vụ file tĩnh bằng Nginx
+FROM nginx:alpine
 
-CMD ["npm", "run", "dev", "--", "--host"]
+# Sao chép dist từ builder sang thư mục phục vụ của nginx
+COPY --from=builder /app/dist /usr/share/nginx/html
+
+# Cấu hình nginx reverse proxy
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+
+EXPOSE 80
+
+# Chạy Nginx ở chế độ foreground
+CMD ["nginx", "-g", "daemon off;"]

@@ -1,0 +1,12 @@
+# Node dependencies & dist
+node_modules/
+dist/
+
+# Git & Logs
+.git/
+.gitignore
+*.log
+
+# Editor
+.vscode/
+.idea/

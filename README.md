@@ -1,131 +1,107 @@
-# Trợ Lý Văn Phòng AI (Bản Khung Skeleton)
+# Trợ Lý Văn Phòng AI (Bản v1)
 
-Dự án Trợ lý Văn phòng AI an toàn với cơ chế **Human-in-the-loop (Người dùng kiểm soát)**, phân loại rủi ro công cụ (`read`, `reversible`, `confirm`), có TTL 10 phút cho các hành động chờ duyệt, chống duyệt trùng (idempotency) và ghi nhật ký kiểm toán (`audit_log`).
-
-> **Giai đoạn hiện tại (Skeleton)**: Sử dụng `FakeLLM` và các mock provider (chưa tích hợp Google thật và chưa tích hợp RAG thật) để kiểm thử toàn diện khung luồng phê duyệt.
+Hệ thống Trợ lý Văn phòng AI thông minh với nguyên tắc cốt lõi **Human-in-the-Loop**: các thao tác rủi ro cao (gửi email, xóa dữ liệu sheet) luôn bắt buộc tạo thẻ xác nhận, xem trước (preview/dry-run), hỗ trợ sửa tham số trước khi duyệt, tự hết hạn sau 10 phút, chống duyệt đúp và ghi vết kiểm toán đầy đủ.
 
 ---
 
-## 📁 Cấu Trúc Dự Án
+## 1. Chạy Thử Nhanh (1 Lệnh duy nhất)
 
-```
-tro-ly-van-phong/
-├── AGENTS.md                  # Quy tắc cốt lõi, luật an toàn và tiêu chuẩn phân quyền tool
-├── PROGRESS.md                # Theo dõi tiến độ triển khai và lộ trình tính năng
-├── README.md                  # Tài liệu hướng dẫn cài đặt và sử dụng
-├── docker-compose.yml         # Chạy cả backend và frontend qua Docker
-├── .env.example               # Mẫu biến môi trường
-├── docs/
-│   └── SKELETON_SPEC.md       # Đặc tả kỹ thuật chi tiết của bản dựng khung
-├── backend/
-│   ├── requirements.txt       # Danh sách thư viện Python
-│   ├── Dockerfile
-│   ├── app/
-│   │   ├── main.py            # FastAPI entrypoint (/chat, /actions/..., /audit)
-│   │   ├── db.py              # SQLite schema (pending_actions, audit_log)
-│   │   ├── agent/
-│   │   │   ├── loop.py        # Vòng lặp agent: nhận tin nhắn -> LLM -> gọi tool/phân quyền
-│   │   │   └── llm.py         # Interface LLMClient + FakeLLM trả lời có kịch bản
-│   │   ├── tools/
-│   │   │   ├── registry.py    # Đăng ký tool kèm risk: read | reversible | confirm
-│   │   │   ├── email.py       # search_email (read), send_email (confirm), create_draft
-│   │   │   ├── calendar.py    # list_events (read), create_event (confirm)
-│   │   │   └── sheets.py      # read_range (read), delete_rows (confirm dry-run)
-│   │   ├── confirm/
-│   │   │   └── service.py     # Tạo pending, preview, approve, reject, TTL 10p, chống duyệt trùng
-│   │   └── rag/
-│   │       └── retriever.py   # Interface Retriever + StubRetriever trả về []
-│   └── tests/
-│       ├── test_confirm.py    # Unit tests cho confirm service (TTL, idempotency, edited_args)
-│       └── test_agent_scenarios.py # Integration tests cho 4 kịch bản mẫu
-└── frontend/
-    ├── package.json
-    ├── Dockerfile
-    ├── vite.config.ts
-    ├── index.html
-    └── src/
-        ├── App.tsx
-        ├── types.ts
-        └── components/
-            ├── Chat.tsx         # Màn hình chat trực quan + gợi ý mẫu
-            ├── ConfirmCard.tsx  # Thẻ "Cần xác nhận" (preview + 3 nút Duyệt / Sửa / Hủy)
-            └── Toast.tsx        # Toast thông báo nổi
-```
+Chỉ cần cài đặt **Docker Desktop** trên máy tính:
+
+1. **Chuẩn bị cấu hình**:
+   ```bash
+   cp .env.example .env
+   ```
+   *(Hoặc trên Windows PowerShell: `Copy-Item .env.example .env`)*.
+   > **Mẹo**: Nếu không tạo `.env`, hệ thống vẫn tự động chạy ở chế độ **Demo** mặc định mà không cần khóa bí mật hay cấu hình tài khoản.
+
+2. **Khởi động ứng dụng**:
+   ```bash
+   docker compose up --build
+   ```
+
+3. **Mở trình duyệt**:
+   Truy cập: **[http://localhost:5173](http://localhost:5173)**
+   Hệ thống tự động đăng nhập người dùng **Demo** với đầy đủ dữ liệu mẫu để thử nghiệm ngay lập tức.
 
 ---
 
-## 🚀 Hướng Dẫn Chạy Dự Án
+## 2. Các Kịch Bản Thử Nghiệm Gợi Ý
 
-### Cách 1: Chạy bằng Docker Compose (Khuyên dùng)
+Dưới đây là các câu lệnh bạn có thể thử ngay trên ô chat:
 
-Chỉ với 1 câu lệnh để khởi động toàn bộ Backend và Frontend:
+- **Tìm email nội bộ**:
+  > Gõ: *"Tìm email về doanh thu quý 3"* hoặc *"Tìm email của Minh"*
+  > *Hành vi*: Tool `search_email` (mức `read`) chạy ngay lập tức và trả về danh sách thư mẫu.
 
-```bash
-docker compose up --build
-```
+- **Gửi email (Thử luồng Duyệt / Sửa / Hủy)**:
+  > Gõ: *"Gửi email cho Lan báo cáo doanh thu"*
+  > *Hành vi*: Hệ thống **không** tự gửi email, mà tạo thẻ **Cần xác nhận** (preview dạng soạn thảo Gmail, đồng hồ đếm ngược 10 phút).
+  > - Bấm **Duyệt**: Thực thi gửi email.
+  > - Bấm **Sửa**: Mở hộp thoại cho phép chỉnh sửa người nhận, tiêu đề, nội dung rồi bấm *"Lưu và duyệt"*.
+  > - Bấm **Hủy**: Hủy bỏ lệnh gửi.
 
-- **Frontend**: `http://localhost:5173`
-- **Backend API & Swagger Docs**: `http://localhost:8000/docs`
+- **Xóa dòng bảng tính (Dry-run preview)**:
+  > Gõ: *"Xóa 3 dòng sheet Khách hàng"*
+  > *Hành vi*: Tạo thẻ xác nhận hiển thị bản xem trước các dòng dữ liệu bị ảnh hưởng, kèm cảnh báo *"Không thể hoàn tác"*.
 
----
+- **Tra cứu tài liệu nội bộ (RAG)**:
+  > Gõ: *"Tìm tài liệu về quy định nghỉ phép"* hoặc *"Chính sách công tác phí thế nào?"*
+  > *Hành vi*: Tool `search_documents` truy vấn SQLite FTS5 từ kho tài liệu mẫu (`data/docs`) và trích dẫn điều khoản chính xác.
 
-### Cách 2: Chạy trực tiếp trên máy (Local)
-
-#### 1. Chạy Backend (FastAPI)
-```bash
-cd backend
-python -m pip install -r requirements.txt
-python -m uvicorn app.main:app --reload --port 8000
-```
-Backend sẽ khởi chạy tại `http://127.0.0.1:8000`. Database SQLite sẽ tự động khởi tạo tại `backend/app/app.db`.
-
-#### 2. Chạy Frontend (React + Vite)
-```bash
-cd frontend
-npm install
-npm run dev
-```
-Mở trình duyệt truy cập: `http://localhost:5173`.
+- **Xem nhật ký kiểm toán (Audit Trail)**:
+  > Chuyển sang tab **"Nhật ký"** trên thanh menu để xem toàn bộ lịch sử các thao tác đã thực thi, đã duyệt, đã sửa hoặc bị từ chối.
 
 ---
 
-## 🧪 Chạy Kiểm Thử (Unit Tests)
+## 3. Sử Dụng Mô Hình Gemini Thật (Tùy Chọn)
 
-Backend đã được trang bị đầy đủ bộ test cho luồng xác nhận và các kịch bản hành vi:
+Mặc định hệ thống dùng `LLM_PROVIDER=fake` (chạy ngoại tuyến, không tốn phí). Để sử dụng mô hình trí tuệ nhân tạo Gemini thật từ Google:
 
-```bash
-# Chạy toàn bộ test
-python -m pytest backend/tests -v
-```
+1. Mở file `.env` và thiết lập:
+   ```env
+   LLM_PROVIDER=gemini
+   GEMINI_API_KEY=AIzaSy...your_gemini_api_key...
+   GEMINI_MODEL=gemini-3.8-flash
+   ```
+2. Khởi động lại: `docker compose up -d`
 
-Bộ test bao gồm:
-1. `test_tool_confirm_does_not_execute_before_approval`: Tool confirm không chạy khi chưa duyệt.
-2. `test_double_approval_only_executes_once`: Duyệt 2 lần chỉ chạy 1 lần (Idempotency).
-3. `test_expired_action_cannot_be_approved`: Quá thời hạn 10 phút thì không duyệt được (`ActionExpiredError`).
-4. `test_approve_with_edited_args_replaces_original_and_audits_both`: Hỗ trợ tham số chỉnh sửa `edited_args` và lưu vết vào `audit_log`.
-5. `test_scenario_1_search_email_runs_immediately`: Kịch bản 1 tìm email chạy ngay lập tức.
-6. `test_scenario_2_and_3_send_email_and_approve_or_reject`: Kịch bản 2 & 3 gửi email, duyệt, hủy.
-7. `test_scenario_4_delete_rows_shows_dry_run_preview`: Kịch bản 4 dry-run xóa dòng sheet.
+> ⚠️ **CẢNH BÁO BẢO MẬT**: Gói API miễn phí của Google có thể dùng dữ liệu trao đổi để cải thiện sản phẩm. Tuyệt đối **không** nhập thông tin cá nhân, mật khẩu hoặc dữ liệu cơ quan thực tế khi thử nghiệm với API key cá nhân.
 
 ---
 
-## 🎯 4 Kịch Bản Hoạt Động Cần Kiểm Thử
+## 4. Chế Độ Google Workspace Thật (`AUTH_MODE=google`)
 
-| # | Câu lệnh người dùng | Mức độ rủi ro | Hành vi hệ thống |
-|---|---|---|---|
-| **1** | `tìm email của Minh` | `read` | Chạy tức thì, hiển thị danh sách email tìm thấy. |
-| **2** | `gửi email cho Minh nội dung Báo cáo tuần đã xong` | `confirm` | **KHÔNG** gửi ngay; xuất hiện thẻ **Cần xác nhận** hiển thị To, Tiêu đề, Nội dung. |
-| **3** | Bấm **Duyệt** hoặc **Hủy** trên thẻ | - | - Bấm **Duyệt**: Mock email được "gửi" và ghi vào `audit_log`.<br>- Bấm **Hủy**: Lệnh bị hủy bỏ, không gửi.<br>- Bấm **Sửa**: Hiện toast *"Chức năng đang phát triển"*. |
-| **4** | `xóa 10 dòng đầu sheet Doanh thu` | `confirm` | Chạy **dry-run** tính toán số dòng, hiển thị bảng dữ liệu mẫu vài dòng sắp bị xóa và chờ xác nhận. |
+Nếu muốn kết nối với tài khoản Google thật (OAuth 2.0 Web Application) thay vì tài khoản demo:
+
+1. Truy cập **Google Cloud Console** > **APIs & Services** > **Credentials**.
+2. Tạo mới **OAuth 2.0 Client ID** loại **Web Application**:
+   - **Authorized redirect URIs**: Thêm `http://localhost:5173/auth/google/callback`
+3. Tải file JSON bí mật về và lưu vào `backend/secrets/web_client_secret.json` (tuyệt đối không chia sẻ file này).
+4. Trong file `.env`:
+   ```env
+   AUTH_MODE=google
+   GOOGLE_WEB_CLIENT_FILE=backend/secrets/web_client_secret.json
+   EMAIL_PROVIDER=google
+   ```
+5. Đăng nhập bằng tài khoản Google trên giao diện. Từng người dùng có thể kết nối Gmail riêng biệt qua menu tài khoản ở góc trên bên phải.
 
 ---
 
-## 📡 Danh Sách API Endpoints
+## 5. Quản Lý & Xử Lý Sự Cố Thường Gặp
 
-- `POST /chat`: Gửi tin nhắn tới Agent và nhận phản hồi (hoặc pending action).
-- `GET /actions/pending`: Lấy danh sách hành động đang chờ duyệt.
-- `GET /actions/{id}`: Xem chi tiết một hành động chờ duyệt (tự động cập nhật `EXPIRED` nếu quá 10 phút).
-- `POST /actions/{id}/approve`: Duyệt thực thi hành động (chống duyệt đúp, hỗ trợ `edited_args`).
-- `POST /actions/{id}/reject`: Hủy bỏ hành động chờ duyệt.
-- `GET /audit`: Xem danh sách nhật ký kiểm toán hệ thống.
-- `GET /health`: Kiểm tra trạng thái máy chủ.
+### Các lệnh quản lý
+- **Dừng hệ thống**:
+  ```bash
+  docker compose down
+  ```
+- **Xóa toàn bộ dữ liệu (reset database SQLite & volume)**:
+  ```bash
+  docker compose down -v
+  ```
+
+### Sự cố thường gặp
+- **Cổng 5173 bị chiếm**: Kiểm tra xem máy bạn có ứng dụng khác đang chiếm cổng 5173 không (`netstat -ano | findstr :5173`). Đổi cổng ở phía host trong `docker-compose.yml` (ví dụ `"127.0.0.1:5174:80"`), nhưng lưu ý nếu dùng Google OAuth thì redirect URI phải khớp cổng.
+- **Docker chưa chạy**: Đảm bảo ứng dụng Docker Desktop đã khởi động trước khi gõ lệnh compose.
+- **Trang trắng hoặc không kết nối được backend**: Đảm bảo cả 2 container `office_assistant_frontend` và `office_assistant_backend` đều đang ở trạng thái `running` (`docker compose ps`).
+- **Cảnh báo mạng LAN & An toàn**: Cổng chỉ được mở trên `127.0.0.1` (localhost). **Tuyệt đối KHÔNG đưa chế độ demo (`AUTH_MODE=demo`) lên môi trường mạng công khai hoặc Internet**, vì chế độ demo tự động cấp phiên truy cập cho bất kỳ ai truy cập.
